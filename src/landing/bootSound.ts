@@ -1,5 +1,3 @@
-import { announce } from "../tools/announce.ts";
-
 /**
  * The boot chime, synthesised with Web Audio rather than shipped as an audio
  * file. No binary asset, nothing to download, and it cannot block first paint.
@@ -85,28 +83,50 @@ export function bootSoundSupported(): boolean {
   return Boolean(window.AudioContext ?? (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext);
 }
 
-/** The line the landing speaks once the chime has finished. */
-export const INTRO_LINE = "SightJarvis is back.";
+/** The recorded line, served from public/. */
+const INTRO_AUDIO_SRC = "/sightjarvis-intro.mp3";
 
-/** Chime runs about 1.7s; the voice follows so the two never overlap. */
+/** Chime runs about 1.7s; the recording follows so the two never overlap. */
 const LINE_DELAY_MS = 1500;
 
 let lineTimer: ReturnType<typeof setTimeout> | undefined;
+let introAudio: HTMLAudioElement | undefined;
+
+function getIntroAudio(): HTMLAudioElement | undefined {
+  if (typeof Audio === "undefined") return undefined;
+  if (!introAudio) {
+    introAudio = new Audio(INTRO_AUDIO_SRC);
+    introAudio.preload = "auto";
+  }
+  return introAudio;
+}
+
+/** Plays the recording. Safe to call again; it restarts from the beginning. */
+export function playIntroLine(): void {
+  const audio = getIntroAudio();
+  if (!audio) return;
+  try {
+    audio.currentTime = 0;
+  } catch {
+    /* Not seekable yet; play from wherever it is. */
+  }
+  // Autoplay may still refuse here even though the chime started, so failures
+  // are swallowed rather than surfaced: the landing reads fine in silence.
+  void audio.play().catch(() => undefined);
+}
 
 /**
- * The full entrance: chime, then the spoken line.
+ * The full entrance: chime, then the recorded line.
  *
- * The line goes through `announce` rather than its own utterance so it shares
- * the single speech channel with guided navigation and agent speech, and so it
- * inherits the iOS handling there. Returns false when audio could not start,
- * which is the caller's signal to wait for a user gesture.
+ * Returns false when audio could not start at all, which is the caller's signal
+ * to wait for a user gesture and try again.
  */
 export function playIntro(): boolean {
   if (!playBootSound()) return false;
   cancelIntro();
   lineTimer = setTimeout(() => {
     lineTimer = undefined;
-    announce(INTRO_LINE);
+    playIntroLine();
   }, LINE_DELAY_MS);
   return true;
 }
@@ -114,4 +134,5 @@ export function playIntro(): boolean {
 export function cancelIntro(): void {
   if (lineTimer) clearTimeout(lineTimer);
   lineTimer = undefined;
+  introAudio?.pause();
 }
