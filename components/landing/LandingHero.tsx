@@ -2,9 +2,9 @@
 
 import { useEffect, useRef } from "react";
 import Link from "next/link";
-import { ArrowRight, Eye, ShieldAlert, Volume2 } from "lucide-react";
+import { ArrowRight, Eye, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { playBootSound } from "@/src/landing/bootSound.ts";
+import { cancelIntro, playIntro } from "@/src/landing/bootSound.ts";
 
 const INTRO_KEY = "sightloop:intro:v1";
 
@@ -27,26 +27,27 @@ function markPlayed(): void {
 export function LandingHero() {
   const armedRef = useRef(false);
 
-  // The chime plays once per browser. Autoplay policy blocks audio before a
-  // gesture, so when the immediate attempt fails we arm a single listener and
-  // let the first tap or keypress start it instead.
+  // The chime and the spoken line play once per browser. Autoplay policy blocks
+  // audio before a gesture, so when the immediate attempt fails we arm a single
+  // listener and let the first tap or keypress start it instead.
   useEffect(() => {
     if (alreadyPlayed() || armedRef.current) return;
     armedRef.current = true;
 
-    if (playBootSound()) {
+    if (playIntro()) {
       markPlayed();
-      return;
+      return cancelIntro;
     }
 
     const start = () => {
-      if (playBootSound()) markPlayed();
+      if (playIntro()) markPlayed();
       window.removeEventListener("pointerdown", start);
       window.removeEventListener("keydown", start);
     };
     window.addEventListener("pointerdown", start, { once: true });
     window.addEventListener("keydown", start, { once: true });
     return () => {
+      cancelIntro();
       window.removeEventListener("pointerdown", start);
       window.removeEventListener("keydown", start);
     };
@@ -96,15 +97,6 @@ export function LandingHero() {
             <Link href="/app">
               Enter SightJarvis <ArrowRight className="size-5" aria-hidden="true" />
             </Link>
-          </Button>
-
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => { playBootSound(); markPlayed(); }}
-            className="min-h-14 w-full rounded-2xl border-white/25 bg-white/5 px-6 text-base font-semibold text-white hover:bg-white/10 sm:w-auto"
-          >
-            <Volume2 className="size-5" aria-hidden="true" /> Play the intro sound
           </Button>
         </div>
 
