@@ -1,0 +1,104 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../vendor/shadcn-tailwind-4.13.0.css";
+
+:root {
+  --background: #f4f5ef;
+  --foreground: #111412;
+  --card: #ffffff;
+  --card-foreground: #111412;
+  --popover: #ffffff;
+  --popover-foreground: #111412;
+  --primary: #17271f;
+  --primary-foreground: #ffffff;
+  --secondary: #e8ebe3;
+  --secondary-foreground: #17271f;
+  --muted: #e8ebe3;
+  --muted-foreground: #59615c;
+  --accent: #f4d448;
+  --accent-foreground: #111412;
+  --destructive: #bb2f3a;
+  --border: #ced3ca;
+  --input: #c5cbc1;
+  --ring: #1f7a5a;
+  --radius: 1rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 3px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+  --font-sans: "Aptos", "Segoe UI Variable", "Noto Sans", sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b0f0d;
+    --foreground: #f3f5ed;
+    --card: #141a17;
+    --card-foreground: #f3f5ed;
+    --popover: #141a17;
+    --popover-foreground: #f3f5ed;
+    --primary: #f4d448;
+    --primary-foreground: #111412;
+    --secondary: #222a26;
+    --secondary-foreground: #eef2ea;
+    --muted: #222a26;
+    --muted-foreground: #aab3ad;
+    --accent: #f4d448;
+    --accent-foreground: #111412;
+    --destructive: #ff7d87;
+    --border: #343e38;
+    --input: #465149;
+    --ring: #6de0aa;
+  }
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+button, input { font: inherit; }
+button:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 3px;
+}
+.safe-bottom { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+
+/* Space for the guided-navigation control bar, which only renders from the
+   small breakpoint up. On phones the bar is hidden, so no space is reserved. */
+@media (min-width: 640px) {
+  .guided-nav-active { padding-bottom: 6.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
