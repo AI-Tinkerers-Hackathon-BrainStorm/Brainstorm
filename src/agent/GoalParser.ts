@@ -1,18 +1,5 @@
 import type { AgentGoal } from "../types/index.ts";
-
-const COLORS: Array<{ pattern: RegExp; value: string }> = [
-  { pattern: /\bred\b|红色?/, value: "red" },
-  { pattern: /\borange\b|橙色?/, value: "orange" },
-  { pattern: /\byellow\b|黄色?/, value: "yellow" },
-  { pattern: /\bgreen\b|绿色?/, value: "green" },
-  { pattern: /\bblue\b|蓝色?/, value: "blue" },
-  { pattern: /\bpurple\b|紫色?/, value: "purple" },
-  { pattern: /\bpink\b|粉色?/, value: "pink" },
-  { pattern: /\bblack\b|黑色?/, value: "black" },
-  { pattern: /\bwhite\b|白色?/, value: "white" },
-  { pattern: /\bgr(?:a|e)y\b|灰色?/, value: "gray" },
-  { pattern: /\bbrown\b|棕色?/, value: "brown" },
-];
+import { COLOR_PATTERNS, extractColor } from "./ObjectIdentity.ts";
 
 export type UserIntent =
   | { kind: "PERSISTENT_GOAL"; goalType: AgentGoal["type"] }
@@ -24,7 +11,7 @@ function goalTypeFor(command: string): AgentGoal["type"] | undefined {
   if (/\b(find|locate|look for)\b|(?:帮我|帮忙|请)?(?:找|寻找|定位)(?:到|一下)?/.test(lower)) return "find";
   if (/\b(read|what does .* say)\b|(?:帮我|请)?(?:读|念)(?:一下|出来|出)?|识别(?:一下)?(?:文字|字)/.test(lower)) return "read";
   if (/\b(remember|keep track)\b|(?:帮我|请)?(?:记住|记下)/.test(lower)) return "remember";
-  if (/\b(where did|where are|where was|last see|do you remember)\b|(?:我(?:的)?\S*)?(?:放哪|在哪里|在哪儿)|上次(?:看见|看到)/.test(lower)) return "review";
+  if (/\b(where(?:'s| is| are| was| did)|last see|do you remember)\b|(?:在哪[儿里]?|去哪[儿里]?了?|不见了|到哪去了|放哪[儿里]?了?)|上次(?:看见|看到)/.test(lower)) return "review";
   if (/\b(keep watching|watch continuously|monitor)\b|帮我看着|持续(?:看|观察|留意)/.test(lower)) return "explore";
   return undefined;
 }
@@ -40,7 +27,7 @@ export function parseUserIntent(command: string): UserIntent {
 }
 
 export function parseGoal(command: string, now = Date.now()): AgentGoal {
-  const normalized = command.trim().replace(/[.!?]+$/, "");
+  const normalized = command.trim().replace(/[.!?？！]+$/, "");
   const type = goalTypeFor(normalized) ?? "explore";
 
   const stripped = normalized
@@ -50,10 +37,13 @@ export function parseGoal(command: string, now = Date.now()): AgentGoal {
     .replace(/^(请)?(帮我)?(记住|记下)/i, "")
     .replace(/^(my|the|a|an)\s+/i, "")
     .replace(/^我的?/, "")
+    .replace(/(?:在哪[儿里]?|去哪[儿里]?了?|不见了|到哪去了|放哪[儿里]?了?)$/u, "")
+    .replace(/的/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
-  const colorMatch = COLORS.find((item) => item.pattern.test(stripped));
-  const color = colorMatch?.value;
-  const target = colorMatch ? stripped.replace(colorMatch.pattern, "").replace(/\s+/g, " ").trim() : stripped;
+  const color = extractColor(stripped);
+  const colorPattern = COLOR_PATTERNS.find((item) => item.pattern.test(stripped))?.pattern;
+  const target = colorPattern ? stripped.replace(colorPattern, "").replace(/\s+/g, " ").trim() : stripped;
 
   return {
     id: `goal-${now}`,

@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentStateMachine } from "../agent/AgentStateMachine.ts";
 import { AgentOrchestrator } from "../agent/AgentOrchestrator.ts";
-import { parseUserIntent } from "../agent/GoalParser.ts";
+import { composeAbsenceReply, composeSceneInventory, hasUsefulObjectInventory, scanAddsNewObjects } from "../agent/EvidenceReply.ts";
+import { parseGoal, parseUserIntent } from "../agent/GoalParser.ts";
+import { queryMatchesSubject } from "../agent/ObjectIdentity.ts";
 import { REALTIME_AGENT_SYSTEM_PROMPT, visionPrompt } from "../agent/prompts.ts";
+import { ASR_WATCHDOG_MS, shouldFallbackUnansweredTurn } from "../agent/TurnWatchdog.ts";
 import { SaliencePolicy } from "../agent/SaliencePolicy.ts";
 import { ToolDispatcher } from "../agent/ToolDispatcher.ts";
 import { EpisodicMemory } from "../memory/EpisodicMemory.ts";
@@ -31,6 +34,10 @@ function observation(id: string, capturedAt: number, objects: DetectedObject[] =
 
 function bottle(x1: number, x2: number, confidence = 0.9): DetectedObject {
   return { label: "bottle", color: "red", bbox: { x1, y1: 0.2, x2, y2: 0.8 }, confidence, source: "deep_vision" };
+}
+
+function cup(confidence = 0.88): DetectedObject {
+  return { label: "cup", color: "red", spatialRelation: ["on the table"], confidence, source: "deep_vision" };
 }
 
 test("AgentStateMachine permits mode-specific transitions and rejects invalid ones", () => {
@@ -258,6 +265,23 @@ test("stale observations never enter current memory or trigger a warning", () =>
   assert.match(agent.snapshot().timeline.at(-1)?.label ?? "", /Stale observation dropped/);
 });
 
+test("late background results update last-seen memory without becoming current evidence", () => {
+  const agent = new AgentOrchestrator(() => undefined, [], {}, [], { now: () => 10_000 });
+  const late = {
+    ...observation("late", 2_000, [cup()]),
+    freshness: "STALE" as const,
+    staleReason: "captured_8000ms_before_response",
+  };
+  agent.recordHistoricalObservation(late);
+  assert.equal(agent.snapshot().observation, undefined);
+  assert.equal(agent.episodicMemory.recall("红色杯子").state, "LAST_SEEN");
+  assert.match(agent.episodicMemory.formatRecall("红色杯子"), /上次看到/);
+
+  const tooOld = { ...late, frameId: "too-old", id: "too-old", capturedAt: -6_000 };
+  agent.recordHistoricalObservation(tooOld);
+  assert.ok(!agent.episodicMemory.all().some((event) => event.evidence.frameIds.includes("too-old")));
+});
+
 test("greetings are conversation while bilingual visual commands receive the intended intent", () => {
   assert.deepEqual(parseUserIntent("你好"), { kind: "GENERAL_CONVERSATION" });
   assert.deepEqual(parseUserIntent("帮我找红色杯子"), { kind: "PERSISTENT_GOAL", goalType: "find" });
@@ -268,6 +292,11 @@ test("greetings are conversation while bilingual visual commands receive the int
   assert.deepEqual(parseUserIntent("帮我看一下前方"), { kind: "EPHEMERAL_VISUAL_QA", detailed: true });
   assert.deepEqual(parseUserIntent("我面前都有哪些东西"), { kind: "EPHEMERAL_VISUAL_QA", detailed: true });
   assert.deepEqual(parseUserIntent("what I can you see"), { kind: "EPHEMERAL_VISUAL_QA", detailed: true });
+  assert.deepEqual(parseUserIntent("杯子在哪"), { kind: "PERSISTENT_GOAL", goalType: "review" });
+  assert.deepEqual(parseUserIntent("where is my red cup"), { kind: "PERSISTENT_GOAL", goalType: "review" });
+  assert.deepEqual(parseUserIntent("杯子不见了"), { kind: "PERSISTENT_GOAL", goalType: "review" });
+  assert.equal(parseGoal("红色的杯子在哪").target, "杯子");
+  assert.equal(parseGoal("红色的杯子在哪").attributes.color, "red");
 });
 
 test("realtime and structured vision prompts have separate response contracts", () => {
@@ -276,6 +305,9 @@ test("realtime and structured vision prompts have separate response contracts", 
   const detailed = visionPrompt("inspect the table", "", true);
   assert.match(detailed, /Return only valid JSON/i);
   assert.match(detailed, /medicine bottles, USB drives, greeting cards/i);
+  const background = visionPrompt("explore", "", false);
+  assert.match(background, /cups, mugs, bottles/i);
+  assert.match(background, /Always record color/i);
   assert.equal(VISION_RESPONSE_FORMAT.type, "json_schema");
   assert.equal(VISION_RESPONSE_FORMAT.json_schema.strict, true);
 });
@@ -314,4 +346,92 @@ test("Safari audio policy selects browser speech whenever native RTP audio is un
   assert.equal(shouldUseSpeechSynthesis(false, false), true);
   assert.equal(shouldUseSpeechSynthesis(true, false), true);
   assert.equal(shouldUseSpeechSynthesis(true, true), false);
+});
+
+test("object identity matches bilingual color and small-object names", () => {
+  assert.equal(queryMatchesSubject("红色杯子", "red cup", "red"), true);
+  assert.equal(queryMatchesSubject("蓝色杯子", "red cup", "red"), false);
+  assert.equal(queryMatchesSubject("被子", "quilt"), true);
+});
+
+test("working observations become last-seen memory and stay distinct from current visibility", () => {
+  let now = 1;
+  const agent = new AgentOrchestrator(() => undefined, [], {}, [], { now: () => now });
+  agent.observe(observation("1", 1, [cup(), { label: "person", confidence: 0.9, source: "deep_vision" }, { label: "hand", confidence: 0.8, source: "deep_vision" }]));
+  assert.equal(agent.episodicMemory.recall("红色杯子").state, "LAST_SEEN");
+  assert.equal(agent.episodicMemory.recall("红色杯子", agent.workingMemory.latest()).state, "CURRENTLY_VISIBLE");
+  assert.match(agent.answerFromEvidence("杯子在哪") ?? "", /我(?:现在)?能看到|I can see/i);
+  now = 2;
+  agent.observe(observation("2", 2));
+  assert.match(agent.answerFromEvidence("杯子在哪") ?? "", /上次看到|last saw/i);
+  assert.match(agent.episodicMemory.formatRecall("keys"), /reliable location memory|可靠记忆/i);
+  assert.doesNotMatch(agent.answerFromEvidence("杯子在哪") ?? "", /stolen|thief|偷走|被人拿走/i);
+  assert.ok(!agent.episodicMemory.all().some((item) => /person|hand/i.test(item.subject)));
+});
+
+test("three still absences can infer relocation without claiming theft or a single-frame removal", () => {
+  const reasoner = new TemporalReasoner();
+  const history = [
+    observation("1", 1, [cup()]),
+    observation("2", 2),
+    observation("3", 3),
+    observation("4", 4),
+  ];
+  const events = reasoner.analyze(history);
+  assert.ok(events.some((event) => event.type === "DISAPPEARED"));
+  assert.ok(events.every((event) => event.type !== "PICKED_UP"));
+  assert.match(events.find((event) => event.type === "DISAPPEARED")?.description ?? "", /may have been moved/i);
+  const pan = reasoner.analyze([
+    observation("a", 1, [cup()]),
+    observation("b", 2, [], "high"),
+    observation("c", 3, [], "high"),
+    observation("d", 4, [], "high"),
+  ]);
+  assert.ok(!pan.some((event) => event.type === "DISAPPEARED" || event.type === "PICKED_UP"));
+});
+
+test("user turn timeout restores background find decisions", () => {
+  const spoken: string[] = [];
+  let now = 1_000;
+  const agent = new AgentOrchestrator((text) => spoken.push(text), [], {}, [], { now: () => now, userTurnTimeoutMs: 100 });
+  agent.setGoal("Find my red bottle");
+  agent.beginUserTurn();
+  const goalAssessment = { relevant: true, targetVisible: true, candidateConfidence: 0.9, guidance: "LEFT" as const, shouldSpeak: true, speech: "A little left." };
+  agent.observe({ ...observation("1", 1, [bottle(0.2, 0.3)]), goalAssessment });
+  assert.deepEqual(spoken, []);
+  now = 1_200;
+  agent.observe({ ...observation("2", 2, [bottle(0.2, 0.3)]), goalAssessment });
+  assert.equal(spoken.at(-1), "A little left.");
+});
+
+test("evidence replies list colors and refuse theft language", () => {
+  const scene = observation("1", 1, [cup(), { label: "person", confidence: 0.9, source: "deep_vision" }]);
+  assert.match(composeSceneInventory(scene, "我前面有什么"), /红色|red cup/i);
+  const absent = composeAbsenceReply("red cup", { id: "m", timestamp: 1, subject: "red cup", action: "NOT_IN_VIEW", location: "on the table", confidence: 0.6, evidence: { frameIds: [], observationIds: [] }, epistemic: "INFERRED" }, "杯子在哪");
+  assert.match(absent, /可能被挪走|may have been moved/i);
+  assert.doesNotMatch(absent, /stolen|thief|偷/i);
+  assert.equal(scanAddsNewObjects(scene, { ...scene, objects: [...scene.objects, { label: "keys", confidence: 0.8, source: "deep_vision" }] }), true);
+  assert.equal(hasUsefulObjectInventory(observation("hands", 1, [{ label: "person", confidence: 0.9, source: "deep_vision" }, { label: "hand", confidence: 0.9, source: "deep_vision" }])), false);
+  assert.equal(hasUsefulObjectInventory(scene, "cup", "red"), true);
+  assert.equal(hasUsefulObjectInventory(scene, "cup", "blue"), false);
+});
+
+test("unanswered realtime turns fall back after the ASR watchdog budget", () => {
+  assert.equal(shouldFallbackUnansweredTurn(undefined, ASR_WATCHDOG_MS), true);
+  assert.equal(shouldFallbackUnansweredTurn({ firstModelEventAt: 10 }, 2_000), false);
+  assert.equal(shouldFallbackUnansweredTurn({ responseDoneAt: 10 }, 2_000), false);
+  assert.equal(shouldFallbackUnansweredTurn({}, 400), false);
+});
+
+test("forced text fallback uses the HTTP path and returns an audible fallback transcript", async () => {
+  let requested = "";
+  const replies: string[] = [];
+  const provider = new QwenRealtimeProvider(async (input) => {
+    requested = String(input);
+    return new Response(JSON.stringify({ text: "Fallback answer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  provider.onTranscript((event) => replies.push(event.text));
+  await provider.sendText("hello", { forceFallback: true });
+  assert.equal(requested, "/api/realtime/text");
+  assert.deepEqual(replies, ["Fallback answer"]);
 });

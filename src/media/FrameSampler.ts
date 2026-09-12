@@ -8,6 +8,7 @@ export class FrameSampler {
   private worker = new Worker(new URL("./frame.worker.ts", import.meta.url), { type: "module" });
   private queue: LatestFrameProcessor<PendingBitmap>;
   private active = false;
+  private paused = false;
   private fps = 0.8;
   private lastCapturedAt = 0;
   private sequence = 0;
@@ -30,11 +31,20 @@ export class FrameSampler {
   start(): void {
     if (this.active) return;
     this.active = true;
+    this.paused = false;
     this.schedule();
+  }
+
+  pause(): void { this.paused = true; }
+
+  resume(): void {
+    if (!this.active) return;
+    this.paused = false;
   }
 
   stop(): void {
     this.active = false;
+    this.paused = false;
     if (this.timeout) clearTimeout(this.timeout);
     this.queue.stop();
     this.worker.terminate();
@@ -48,7 +58,7 @@ export class FrameSampler {
   }
 
   private async maybeCapture(now: number) {
-    if (!this.active || !isVideoFrameReady(this.video) || now - this.lastCapturedAt < 1_000 / this.fps) return;
+    if (!this.active || this.paused || !isVideoFrameReady(this.video) || now - this.lastCapturedAt < 1_000 / this.fps) return;
     this.lastCapturedAt = now;
     try {
       const bitmap = await createImageBitmap(this.video);
@@ -72,7 +82,7 @@ export class FrameSampler {
         }, event.data.encodeMs ?? 0).then(resolve, reject);
       };
       this.worker.addEventListener("message", handler);
-      this.worker.postMessage({ id, bitmap: item.bitmap, width: 640, height: 360, quality: 0.7 }, [item.bitmap]);
+      this.worker.postMessage({ id, bitmap: item.bitmap, width: 960, height: 540, quality: 0.72 }, [item.bitmap]);
     });
   }
 }

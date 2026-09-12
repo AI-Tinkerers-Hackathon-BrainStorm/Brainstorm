@@ -11,7 +11,7 @@ SightLoop is experimental assistance, not a certified navigation or collision-av
 - Treat approaching-object output as a relative image pattern only, after at least three supporting observations.
 - The hackathon stable path keeps approaching patterns in the debug timeline and does not proactively speak them.
 - Do not infer that someone removed an object from one missing frame. A camera pan produces `NOT_IN_CURRENT_VIEW`.
-- Use “may have” for conservative multi-frame inferences; never accuse a person of theft.
+- Use “may have” for conservative multi-frame inferences; never accuse a person of theft. After several fresh, still frames without a previously seen object, say it may have been moved, covered, or picked up, and that the cause is unconfirmed. A late background result may update only timestamped last-seen memory, never current-view guidance or an absence inference.
 
 ## Data handling
 

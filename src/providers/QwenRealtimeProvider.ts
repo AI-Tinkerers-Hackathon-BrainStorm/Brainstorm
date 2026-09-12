@@ -150,7 +150,7 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       requestSentAt: now,
     });
 
-    if (this.state === "WEBRTC_CONNECTED" && this.channel?.readyState === "open"
+    if (!options.forceFallback && this.state === "WEBRTC_CONNECTED" && this.channel?.readyState === "open"
       && canReportWebRtcConnected(this.telemetry.peerConnectionState, this.telemetry.iceConnectionState, this.telemetry.dataChannelState, this.telemetry.realtimeVideoTrackState, this.telemetry.realtimeSessionState)) {
       this.channel.send(JSON.stringify({
         event_id: `event-${now}`,
@@ -161,7 +161,7 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       return;
     }
 
-    this.setState("FALLBACK");
+    if (!options.forceFallback) this.setState("FALLBACK");
     try {
       const response = await this.fetcher("/api/realtime/text", {
         method: "POST",
@@ -196,7 +196,7 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       ...context,
     }));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort("background_vision_timeout"), 9_500);
+    const timeout = setTimeout(() => controller.abort("background_vision_timeout"), 13_500);
     this.visionAbort = controller;
     try {
       const response = await this.fetcher("/api/vision", { method: "POST", body: form, signal: controller.signal });
@@ -586,13 +586,12 @@ export class QwenRealtimeProvider implements RealtimeProvider {
   }
 
   sendToolResult(callId: string | undefined, result: unknown): void {
-    if (this.responseSuppressed) return;
     if (!callId) throw new Error("tool_call_id_missing");
     if (this.channel?.readyState !== "open") throw new Error("realtime_data_channel_closed");
     this.channel.send(JSON.stringify({
       type: "conversation.item.create",
       item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result ?? null) },
     }));
-    this.channel.send(JSON.stringify({ type: "response.create" }));
+    if (!this.responseSuppressed) this.channel.send(JSON.stringify({ type: "response.create" }));
   }
 }

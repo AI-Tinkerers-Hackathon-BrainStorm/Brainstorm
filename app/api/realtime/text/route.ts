@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { REALTIME_AGENT_SYSTEM_PROMPT } from "@/src/agent/prompts.ts";
+import { TEXT_FALLBACK_SYSTEM_PROMPT } from "@/src/agent/prompts.ts";
 import { MODELS } from "@/src/config/models.ts";
 import { callQwenText } from "@/src/providers/server/QwenClient.ts";
 
@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     const text = await callQwenText({
       text: body.text.trim(),
       context: typeof body.context === "string" ? body.context : undefined,
-      prompt: REALTIME_AGENT_SYSTEM_PROMPT,
+      prompt: TEXT_FALLBACK_SYSTEM_PROMPT,
       model: MODELS.conversationFallback,
       timeoutMs: 9_000,
     });
