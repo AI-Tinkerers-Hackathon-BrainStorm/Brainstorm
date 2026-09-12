@@ -102,3 +102,53 @@ button:focus-visible, input:focus-visible, summary:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+/* ---------------------------------------------------------------------------
+   Landing sequence. Every animation here is decorative: the global
+   prefers-reduced-motion rule above collapses them to a single frame, and the
+   markup that uses them is aria-hidden, so nothing below is load bearing.
+   --------------------------------------------------------------------------- */
+
+@keyframes sj-spin { to { transform: rotate(360deg); } }
+@keyframes sj-spin-reverse { to { transform: rotate(-360deg); } }
+
+@keyframes sj-core-pulse {
+  0%, 100% { opacity: .85; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.06); }
+}
+
+@keyframes sj-bloom {
+  from { opacity: 0; transform: scale(.55); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes sj-scan {
+  0%   { transform: translateY(-120%); opacity: 0; }
+  12%  { opacity: .75; }
+  88%  { opacity: .75; }
+  100% { transform: translateY(120%); opacity: 0; }
+}
+
+@keyframes sj-rise {
+  from { opacity: 0; transform: translateY(14px); filter: blur(6px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
+}
+
+.sj-ring        { animation: sj-spin 14s linear infinite; }
+.sj-ring-alt    { animation: sj-spin-reverse 9s linear infinite; }
+.sj-core        { animation: sj-core-pulse 2.6s ease-in-out infinite; }
+.sj-bloom       { animation: sj-bloom .9s cubic-bezier(.2,.8,.2,1) both; }
+.sj-scan        { animation: sj-scan 3.4s ease-in-out infinite; }
+.sj-rise        { animation: sj-rise .7s cubic-bezier(.2,.8,.2,1) both; }
+.sj-delay-1     { animation-delay: .22s; }
+.sj-delay-2     { animation-delay: .40s; }
+.sj-delay-3     { animation-delay: .58s; }
+.sj-delay-4     { animation-delay: .76s; }
+
+/* The faint engineering grid behind the reactor. */
+.sj-grid {
+  background-image:
+    linear-gradient(to right, rgba(244, 212, 72, .08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(244, 212, 72, .08) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(circle at 50% 45%, #000 0%, transparent 72%);
+}

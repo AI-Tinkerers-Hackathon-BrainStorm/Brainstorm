@@ -33,7 +33,7 @@ export function LoginForm() {
     setPending(key);
     try {
       await action();
-      router.replace("/");
+      router.replace("/app");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed. Please try again.");
       // Return focus to the first field so a screen reader user can correct it

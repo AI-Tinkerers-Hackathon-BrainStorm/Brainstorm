@@ -7,6 +7,7 @@ import type {
   VisionObservation,
 } from "../types/index.ts";
 import { REALTIME_AGENT_SYSTEM_PROMPT } from "../agent/prompts.ts";
+import { REALTIME_VOICE } from "../config/models.ts";
 import type { RealtimeProvider, SendTextOptions, TranscriptHandler, Unsubscribe } from "./RealtimeProvider.ts";
 
 type HandlerMap = {
@@ -350,7 +351,7 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        voice: "Ethan",
+        voice: REALTIME_VOICE,
         instructions: REALTIME_AGENT_SYSTEM_PROMPT,
         audio: {
           input: { format: { type: "pcm", sample_rate: 16_000 } },
