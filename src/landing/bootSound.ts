@@ -1,3 +1,5 @@
+import { announce } from "../tools/announce.ts";
+
 /**
  * The boot chime, synthesised with Web Audio rather than shipped as an audio
  * file. No binary asset, nothing to download, and it cannot block first paint.
@@ -81,4 +83,35 @@ export function playBootSound(): boolean {
 export function bootSoundSupported(): boolean {
   if (typeof window === "undefined") return false;
   return Boolean(window.AudioContext ?? (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext);
+}
+
+/** The line the landing speaks once the chime has finished. */
+export const INTRO_LINE = "SightJarvis is back.";
+
+/** Chime runs about 1.7s; the voice follows so the two never overlap. */
+const LINE_DELAY_MS = 1500;
+
+let lineTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * The full entrance: chime, then the spoken line.
+ *
+ * The line goes through `announce` rather than its own utterance so it shares
+ * the single speech channel with guided navigation and agent speech, and so it
+ * inherits the iOS handling there. Returns false when audio could not start,
+ * which is the caller's signal to wait for a user gesture.
+ */
+export function playIntro(): boolean {
+  if (!playBootSound()) return false;
+  cancelIntro();
+  lineTimer = setTimeout(() => {
+    lineTimer = undefined;
+    announce(INTRO_LINE);
+  }, LINE_DELAY_MS);
+  return true;
+}
+
+export function cancelIntro(): void {
+  if (lineTimer) clearTimeout(lineTimer);
+  lineTimer = undefined;
 }
