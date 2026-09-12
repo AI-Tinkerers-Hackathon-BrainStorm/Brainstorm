@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { TEXT_FALLBACK_SYSTEM_PROMPT } from "@/src/agent/prompts.ts";
+import { TEXT_FALLBACK_SYSTEM_PROMPT, TIMELINE_REASONING_PROMPT } from "@/src/agent/prompts.ts";
 import { MODELS } from "@/src/config/models.ts";
 import { callQwenText } from "@/src/providers/server/QwenClient.ts";
 
@@ -8,14 +8,14 @@ export const maxDuration = 12;
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { text?: unknown; context?: unknown };
+    const body = await request.json() as { text?: unknown; context?: unknown; evidenceMode?: unknown };
     if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 1_000) {
       return NextResponse.json({ error: "A non-empty request under 1,000 characters is required." }, { status: 400 });
     }
     const text = await callQwenText({
       text: body.text.trim(),
-      context: typeof body.context === "string" ? body.context : undefined,
-      prompt: TEXT_FALLBACK_SYSTEM_PROMPT,
+      context: typeof body.context === "string" ? body.context.slice(0, 12_000) : undefined,
+      prompt: body.evidenceMode === "timeline" ? TIMELINE_REASONING_PROMPT : TEXT_FALLBACK_SYSTEM_PROMPT,
       model: MODELS.conversationFallback,
       timeoutMs: 9_000,
     });

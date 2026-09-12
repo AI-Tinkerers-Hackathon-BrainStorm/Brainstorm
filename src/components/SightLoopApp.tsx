@@ -118,6 +118,7 @@ export function SightLoopApp() {
   const userTurnSequenceRef = useRef(0);
   const cameraSessionRef = useRef(0);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reasoningAbortRef = useRef<AbortController | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const lowBandwidthRef = useRef(false);
   const [cameraState, setCameraState] = useState<CameraState>("ready");
@@ -264,6 +265,7 @@ export function SightLoopApp() {
       samplerRef.current?.stop();
       scanAbortRef.current?.abort();
       refinementAbortRef.current?.abort();
+      reasoningAbortRef.current?.abort();
       void audio.close();
       camera.stop();
       void provider.disconnect();
@@ -290,6 +292,7 @@ export function SightLoopApp() {
     const agent = orchestratorRef.current;
     const intent = parseUserIntent(text);
     const turnSequence = ++userTurnSequenceRef.current;
+    reasoningAbortRef.current?.abort();
     if (watchdogRef.current) clearTimeout(watchdogRef.current);
     const usesSpecialist = intent.kind === "EPHEMERAL_VISUAL_QA"
       || (intent.kind === "PERSISTENT_GOAL" && ["find", "read", "remember"].includes(intent.goalType));
@@ -305,6 +308,40 @@ export function SightLoopApp() {
     samplerRef.current?.pause();
 
     if (intent.kind === "EPHEMERAL_VISUAL_QA") {
+      const evidence = agent.evidenceForQuestion();
+      const explicitScan = /\b(scan|detailed|closer look)\b|详细|扫描|仔细/.test(text.toLowerCase());
+      if (evidence && !explicitScan) {
+        scanAbortRef.current?.abort("timeline_question");
+        refinementAbortRef.current?.abort("timeline_question");
+        providerRef.current.setResponseSuppressed(true);
+        const controller = new AbortController();
+        reasoningAbortRef.current = controller;
+        const timeout = setTimeout(() => controller.abort("reasoning_timeout"), 10_000);
+        const startedAt = Date.now();
+        agent.tools.log("action", "Reasoning from visual timeline", "Recent structured observations · no image upload");
+        try {
+          const response = await fetch("/api/realtime/text", {
+            method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+            body: JSON.stringify({ text, context: evidence.context, evidenceMode: "timeline" }),
+          });
+          if (!response.ok) throw new Error(`timeline_reasoning_${response.status}`);
+          const result = await response.json() as { text?: string };
+          if (!result.text?.trim()) throw new Error("timeline_reasoning_empty");
+          if (turnSequence === userTurnSequenceRef.current) {
+            speak(result.text);
+            agent.tools.log("action", "Timeline answer completed", `${Date.now() - startedAt} ms`);
+          }
+        } catch {
+          if (turnSequence === userTurnSequenceRef.current) speak(evidence.fallback);
+        } finally {
+          clearTimeout(timeout);
+          if (turnSequence === userTurnSequenceRef.current) providerRef.current.setResponseSuppressed(false);
+          finishUserTurn(turnSequence);
+          const next = agent.snapshot();
+          setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory] });
+        }
+        return;
+      }
       const prior = agent.snapshot().observation;
       const local = agent.answerFromEvidence(text);
       if (local) speak(local);
@@ -317,7 +354,8 @@ export function SightLoopApp() {
             if (observation && (!local || scanAddsNewObjects(prior, observation))) speak(detailedObservationSpeech(observation));
             else if (!observation && !local) {
               const cached = agent.snapshot().detailedScenes.at(-1);
-              speak(cached ? cachedDetailedSpeech(cached) : "I couldn’t complete a fresh scan of the current view. Keep the camera open, hold it steady, and try again.");
+              const recentEvidence = agent.evidenceForQuestion();
+              speak(recentEvidence?.fallback ?? (cached ? cachedDetailedSpeech(cached) : "I haven’t received a usable visual observation yet. The camera is open and analysis is continuing."));
             }
           }
         }
@@ -518,7 +556,7 @@ export function SightLoopApp() {
       refinementPromiseRef.current = null;
     }
     if (!videoRef.current || !cameraRef.current.active) return undefined;
-    const resumeAutomatic = Boolean(samplerRef.current && !lowBandwidthRef.current);
+    const resumeAutomatic = cameraRef.current.active && !lowBandwidthRef.current;
     const task = (async () => {
       samplerRef.current?.stop();
       samplerRef.current = null;

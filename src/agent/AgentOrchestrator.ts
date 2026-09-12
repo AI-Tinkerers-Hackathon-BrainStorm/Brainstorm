@@ -11,6 +11,7 @@ import { extractColor, prefersChinese, queryMatchesSubject } from "./ObjectIdent
 import { SaliencePolicy } from "./SaliencePolicy.ts";
 import { ToolDispatcher } from "./ToolDispatcher.ts";
 import { USER_TURN_TIMEOUT_MS } from "./TurnWatchdog.ts";
+import { timelineEvidence } from "./TimelineEvidence.ts";
 
 export interface AgentSnapshot {
   mode: AgentMode;
@@ -43,6 +44,7 @@ export class AgentOrchestrator {
   readonly temporal = new TemporalReasoner();
   readonly salience = new SaliencePolicy();
   readonly tools = new ToolDispatcher();
+  private readonly reasoningHistory = new DetailedSceneMemory([], 6);
   private goal?: AgentGoal;
   private confirmations = 0;
   private lastGuidance = "";
@@ -142,6 +144,7 @@ export class AgentOrchestrator {
   }
 
   cacheDetailedObservation(observation: VisionObservation): CachedDetailedScene {
+    this.reasoningHistory.add(observation);
     const cached = this.detailedSceneMemory.add(observation);
     this.episodicMemory.recordDetailedScene(cached);
     this.tools.log("memory", "Detailed scene cached as last-seen", `${cached.model} · captured ${cached.capturedAt}`);
@@ -154,6 +157,7 @@ export class AgentOrchestrator {
       this.tools.log("observation", "Historical observation ignored", observation.staleReason ?? observation.frameId);
       return this.snapshot();
     }
+    this.reasoningHistory.add(observation);
     const ingested = this.episodicMemory.ingestObservation(observation);
     this.tools.log(
       "memory",
@@ -187,6 +191,10 @@ export class AgentOrchestrator {
     return this.episodicMemory.formatRecall(subject, current, color);
   }
 
+  evidenceForQuestion() {
+    return timelineEvidence(this.reasoningHistory.all(), this.episodicMemory.all(), this.now());
+  }
+
   private currentObservation(): VisionObservation | undefined {
     const observation = this.workingMemory.latest();
     return observation && this.now() - observation.capturedAt <= 8_000 ? observation : undefined;
@@ -198,6 +206,7 @@ export class AgentOrchestrator {
       return this.snapshot();
     }
     this.tracker.update(observation);
+    this.reasoningHistory.add(observation);
     this.workingMemory.add(observation);
     observation.events = [...(observation.events ?? []), ...this.temporal.analyze(this.workingMemory.all())];
     const ingested = this.episodicMemory.ingestObservation(observation);

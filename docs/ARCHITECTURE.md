@@ -10,6 +10,8 @@ The agent is one deterministic orchestrator around one primary model: goal → o
 
 ## Modules
 
+Ordinary scene questions use the last two minutes of bounded structured observations as input to Qwen text reasoning, including late background observations. This avoids uploading another image for every question. Capture times and historical status accompany the evidence; an explicit detailed scan still captures a new frame. No raw debug instructions or image data are supplied to timeline reasoning.
+
 - `src/media`: camera, microphone, frame sampler, worker, and cleanup.
 - `src/providers`: normalized realtime, deep-vision, and OCR boundaries.
 - `src/agent`: state machine, salience, tool dispatch, and system prompt.

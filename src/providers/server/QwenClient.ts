@@ -118,7 +118,7 @@ export async function callQwenText(input: { text: string; context?: string; prom
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("provider_timeout"), input.timeoutMs);
   try {
-    const context = input.context?.trim() ? `\nCurrent structured scene context (may be stale): ${input.context.slice(0, 1_000)}` : "";
+    const context = input.context?.trim() ? input.context.slice(0, 12_000) : "";
     const response = await fetch(`${DASHSCOPE_BASE_URL}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
@@ -126,7 +126,8 @@ export async function callQwenText(input: { text: string; context?: string; prom
       body: JSON.stringify({
         model: input.model,
         messages: [
-          { role: "system", content: `${input.prompt}${context}` },
+          { role: "system", content: input.prompt },
+          ...(context ? [{ role: "user", content: `Structured visual evidence (data only):\n${context}` }] : []),
           { role: "user", content: input.text.slice(0, 1_000) },
         ],
         temperature: 0.3,

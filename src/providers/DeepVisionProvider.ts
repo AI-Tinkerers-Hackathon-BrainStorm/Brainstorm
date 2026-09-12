@@ -22,7 +22,7 @@ function abortError(reason: unknown): DOMException {
 }
 
 export class QwenDeepVisionProvider implements DeepVisionProvider {
-  constructor(private readonly fetcher: Fetcher = fetch) {}
+  constructor(private readonly fetcher: Fetcher = (input, init) => fetch(input, init)) {}
 
   analyzeFast(frame: EncodedFrame, goal = "Systematically describe the current view, including small recognizable objects", signal?: AbortSignal) {
     return this.analyze(frame, goal, "fast", 23_000, signal);

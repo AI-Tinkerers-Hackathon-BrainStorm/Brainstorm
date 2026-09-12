@@ -5,6 +5,7 @@ import { AgentOrchestrator } from "../agent/AgentOrchestrator.ts";
 import { composeAbsenceReply, composeSceneInventory, detailedObservationSpeech, hasUsefulObjectInventory, scanAddsNewObjects } from "../agent/EvidenceReply.ts";
 import { parseGoal, parseUserIntent } from "../agent/GoalParser.ts";
 import { queryMatchesSubject } from "../agent/ObjectIdentity.ts";
+import { timelineEvidence } from "../agent/TimelineEvidence.ts";
 import { REALTIME_AGENT_SYSTEM_PROMPT, visionPrompt } from "../agent/prompts.ts";
 import { ASR_WATCHDOG_MS, shouldFallbackUnansweredTurn } from "../agent/TurnWatchdog.ts";
 import { SaliencePolicy } from "../agent/SaliencePolicy.ts";
@@ -353,6 +354,34 @@ test("a timed-out Flash scan does not create a second slow foreground request", 
 });
 
 const scanFrame: EncodedFrame = { frameId: "scan-test", capturedAt: 1_000, width: 640, height: 360, blob: new Blob(["test"], { type: "image/jpeg" }), manual: true };
+
+test("manual vision invokes native fetch without a provider instance as receiver", async (context) => {
+  context.mock.method(globalThis, "fetch", async function (this: unknown) {
+    assert.ok(this === undefined || this === globalThis, "Illegal invocation: fetch receiver must not be the provider");
+    return Response.json(observation("native-fetch", 1_000, [cup()]));
+  });
+  const result = await new QwenDeepVisionProvider().analyzeFast(scanFrame);
+  assert.equal(result.frameId, "native-fetch");
+});
+
+test("timeline reasoning retains late scene summaries while never promoting them to live evidence", () => {
+  let now = 12_000;
+  const agent = new AgentOrchestrator(() => undefined, [], {}, [], { now: () => now });
+  agent.recordHistoricalObservation({ ...observation("history1", 3_000, [cup()]), freshness: "STALE", sceneSummary: "A red cup on the table." });
+  now = 20_000;
+  agent.recordHistoricalObservation({ ...observation("history2", 11_000, [cup()]), freshness: "STALE", sceneSummary: "A cup remains on the table." });
+  const evidence = agent.evidenceForQuestion();
+  assert.ok(evidence);
+  const parsed = JSON.parse(evidence.context);
+  assert.equal(parsed.observations.length, 2);
+  assert.equal(parsed.observations[1].ageSeconds, 9);
+  assert.match(evidence.context, /HISTORICAL_OBSERVATIONS_NOT_LIVE_VIDEO/);
+  assert.match(evidence.fallback, /red cup/);
+  assert.equal(agent.snapshot().observation, undefined);
+  now = 150_000;
+  assert.equal(agent.evidenceForQuestion(), undefined);
+  assert.equal(timelineEvidence([], [], now), undefined);
+});
 
 test("manual client timeouts are failures, including a stalled response body", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
