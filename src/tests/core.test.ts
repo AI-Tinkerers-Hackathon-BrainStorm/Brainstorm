@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentStateMachine } from "../agent/AgentStateMachine.ts";
 import { AgentOrchestrator } from "../agent/AgentOrchestrator.ts";
-import { composeAbsenceReply, composeSceneInventory, hasUsefulObjectInventory, scanAddsNewObjects } from "../agent/EvidenceReply.ts";
+import { composeAbsenceReply, composeSceneInventory, detailedObservationSpeech, hasUsefulObjectInventory, scanAddsNewObjects } from "../agent/EvidenceReply.ts";
 import { parseGoal, parseUserIntent } from "../agent/GoalParser.ts";
 import { queryMatchesSubject } from "../agent/ObjectIdentity.ts";
 import { REALTIME_AGENT_SYSTEM_PROMPT, visionPrompt } from "../agent/prompts.ts";
@@ -21,9 +21,10 @@ import { TemporalReasoner } from "../temporal/TemporalReasoner.ts";
 import { parseJsonContent } from "../providers/server/QwenClient.ts";
 import { VISION_RESPONSE_FORMAT } from "../providers/server/VisionSchema.ts";
 import { selectVisionRoute } from "../providers/server/VisionRouting.ts";
-import { runFastWithMaxFallback, shouldTryMaxAfterFastFailure, VisionClientError } from "../providers/DeepVisionProvider.ts";
-import { canReportWebRtcConnected, QwenRealtimeProvider, shouldEmitRealtimeAgentOutput } from "../providers/QwenRealtimeProvider.ts";
-import type { AgentGoal, DetectedObject, MemoryEvent, VisionObservation } from "../types/index.ts";
+import { QwenDeepVisionProvider, runFastWithMaxFallback, shouldTryMaxAfterFastFailure, VisionClientError } from "../providers/DeepVisionProvider.ts";
+import { canReportWebRtcConnected, createRealtimeSessionUpdate, QwenRealtimeProvider, shouldEmitRealtimeAgentOutput } from "../providers/QwenRealtimeProvider.ts";
+import { resolveRealtimeEndpoint } from "../providers/server/RealtimeEndpoint.ts";
+import type { AgentGoal, DetectedObject, EncodedFrame, MemoryEvent, VisionObservation } from "../types/index.ts";
 
 function observation(id: string, capturedAt: number, objects: DetectedObject[] = [], cameraMotion: VisionObservation["cameraMotion"] = "low"): VisionObservation {
   return {
@@ -319,7 +320,7 @@ test("detailed vision uses Flash first, keeps Max for refinement, and skips futi
   assert.equal(fast.model, background.model);
   assert.notEqual(max.model, fast.model);
   assert.ok(max.timeoutMs > fast.timeoutMs);
-  assert.equal(shouldTryMaxAfterFastFailure(new VisionClientError("timeout", "provider_timeout")), true);
+  assert.equal(shouldTryMaxAfterFastFailure(new VisionClientError("timeout", "provider_timeout")), false);
   assert.equal(shouldTryMaxAfterFastFailure(new VisionClientError("auth", "provider_auth")), false);
   assert.equal(shouldTryMaxAfterFastFailure(new VisionClientError("rate", "provider_rate_limit")), false);
 });
@@ -335,11 +336,92 @@ test("manual scan fallback is sequential and does not call Max after a successfu
 
   const fallbackOrder: string[] = [];
   const fallback = await runFastWithMaxFallback(
-    async () => { fallbackOrder.push("fast"); throw new VisionClientError("timeout", "provider_timeout"); },
+    async () => { fallbackOrder.push("fast"); throw new VisionClientError("invalid response", "invalid_json"); },
     async () => { fallbackOrder.push("max"); return "max-result"; },
   );
   assert.deepEqual(fallbackOrder, ["fast", "max"]);
   assert.deepEqual(fallback, { value: "max-result", usedMaxFallback: true });
+});
+
+test("a timed-out Flash scan does not create a second slow foreground request", async () => {
+  let maxCalls = 0;
+  await assert.rejects(runFastWithMaxFallback(
+    async () => { throw new VisionClientError("timeout", "provider_timeout"); },
+    async () => { maxCalls += 1; return "max"; },
+  ), (error: unknown) => error instanceof VisionClientError && error.code === "provider_timeout");
+  assert.equal(maxCalls, 0);
+});
+
+const scanFrame: EncodedFrame = { frameId: "scan-test", capturedAt: 1_000, width: 640, height: 360, blob: new Blob(["test"], { type: "image/jpeg" }), manual: true };
+
+test("manual client timeouts are failures, including a stalled response body", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const provider = new QwenDeepVisionProvider(async (_input, init) => new Response(new ReadableStream({
+    start(controller) {
+      init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+    },
+  })));
+  const request = provider.analyzeFast(scanFrame);
+  const rejected = assert.rejects(request, (error: unknown) => error instanceof VisionClientError && error.code === "provider_timeout");
+  await Promise.resolve();
+  context.mock.timers.tick(23_000);
+  await rejected;
+});
+
+test("superseded scans never send pre-aborted work or return a late provider result", async () => {
+  let calls = 0;
+  const cancelled = new AbortController();
+  cancelled.abort("superseded_by_user_turn");
+  const provider = new QwenDeepVisionProvider(async () => { calls += 1; return Response.json(observation("scan", 1_000)); });
+  await assert.rejects(provider.analyzeFast(scanFrame, "scene", cancelled.signal), { name: "AbortError" });
+  assert.equal(calls, 0);
+  const superseded = new AbortController();
+  const delayedProvider = new QwenDeepVisionProvider(async () => {
+    superseded.abort("superseded_by_user_turn");
+    return Response.json(observation("scan", 1_000));
+  });
+  await assert.rejects(delayedProvider.analyzeFast(scanFrame, "scene", superseded.signal), { name: "AbortError" });
+});
+
+test("slow successful scans answer about the captured frame without claiming current visibility", () => {
+  const scan = { ...observation("scan", 1_000, [cup()]), purpose: "detailed" as const };
+  const reply = detailedObservationSpeech(scan, 13_000);
+  assert.match(reply, /captured 12 seconds ago/);
+  assert.match(reply, /red cup/);
+  assert.match(reply, /can’t confirm/);
+  assert.doesNotMatch(reply, /I can see|scan again/i);
+  assert.match(detailedObservationSpeech({ ...scan, freshness: "STALE" }, 40_000), /captured 39 seconds ago/);
+  const agent = new AgentOrchestrator(() => undefined);
+  agent.cacheDetailedObservation(scan);
+  assert.equal(agent.snapshot().observation, undefined);
+  assert.equal(agent.snapshot().detailedScenes[0].epistemic, "LAST_SEEN");
+  assert.equal(agent.snapshot().detailedScenes[0].capturedAt, 1_000);
+});
+
+test("workspace realtime configuration is validated before trying an impossible handshake", async () => {
+  const endpoint = resolveRealtimeEndpoint("https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", "realtime-model");
+  assert.equal(endpoint.url, "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime?model=realtime-model");
+  assert.equal(resolveRealtimeEndpoint("https://dashscope.aliyuncs.com/compatible-mode/v1", "model").issue, "workspace_realtime_base_url_required");
+  assert.equal(resolveRealtimeEndpoint("http://workspace.cn-beijing.maas.aliyuncs.com", "model").configured, false);
+  assert.equal(resolveRealtimeEndpoint("https://workspace.cn-beijing.maas.aliyuncs.com.evil.test", "model").configured, false);
+  let handshakeAttempts = 0;
+  class ConfiguredRealtimeProvider extends QwenRealtimeProvider {
+    protected override async connectWebRtc(): Promise<void> { handshakeAttempts += 1; }
+  }
+  const provider = new ConfiguredRealtimeProvider(async () => Response.json({ realtimeConfigured: false, realtimeIssue: "workspace_realtime_base_url_required" }));
+  await provider.connect();
+  assert.equal(handshakeAttempts, 0);
+  assert.equal(provider.currentTelemetry.transport, "FALLBACK");
+  assert.equal(provider.currentTelemetry.lastError, "workspace_realtime_base_url_required");
+});
+
+test("realtime session update uses Qwen flat audio configuration and function tools", () => {
+  const { session } = createRealtimeSessionUpdate();
+  assert.equal(session.input_audio_format, "pcm");
+  assert.equal(session.output_audio_format, "pcm");
+  assert.equal("audio" in session, false);
+  assert.equal(session.turn_detection.type, "semantic_vad");
+  assert.ok(session.tools.some((tool) => tool.function.name === "request_deep_vision"));
 });
 
 test("Safari audio policy selects browser speech whenever native RTP audio is unavailable", () => {

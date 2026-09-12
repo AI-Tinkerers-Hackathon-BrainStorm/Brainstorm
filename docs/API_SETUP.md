@@ -8,7 +8,7 @@ DASHSCOPE_API_KEY=your_key
 
 Do not use a `NEXT_PUBLIC_` prefix. The browser never receives the long-lived key.
 
-The default compatible endpoint is the legacy China (Beijing) endpoint. For a workspace-specific domain or another supported region, set the full compatible base URL:
+The default compatible endpoint can serve text and vision, but Qwen WebRTC requires a workspace-specific domain. For a Beijing key, set the full compatible base URL:
 
 ```text
 DASHSCOPE_BASE_URL=https://YOUR_WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
@@ -20,7 +20,7 @@ or:
 DASHSCOPE_BASE_URL=https://YOUR_WORKSPACE.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
 ```
 
-The server derives same-origin realtime signaling and temporary-token endpoints from that origin. Keys are region-specific, so the key and base URL must match.
+The server derives the realtime signaling endpoint from that origin. Keys, workspaces, and base URLs are region-specific and must match. If this variable is missing or points at the legacy global endpoint, SightLoop deliberately reports `FALLBACK` while keeping text and sampled HTTPS vision available.
 
 Optional overrides:
 

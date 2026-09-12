@@ -12,7 +12,7 @@ export const TEXT_FALLBACK_SYSTEM_PROMPT = `You are SightLoop's direct text fall
 export const VISION_STRUCTURED_SYSTEM_PROMPT = `You analyze one camera frame for SightLoop, a visual assistance agent for blind and low-vision people.
 Return only valid JSON matching the requested schema. Analyze only the supplied frame. Separate current visual evidence from uncertainty. Never invent text, objects, coordinates, distances, motion, or collision time. Omit a bounding box unless you can genuinely localize the object, and keep every returned coordinate normalized to 0..1.`;
 
-export function visionPrompt(goalDescription: string, recentContext: string, detailed = false) {
+export function visionPrompt(goalDescription: string, recentContext: string, detailed = false, compact = false) {
   return `${VISION_STRUCTURED_SYSTEM_PROMPT}
 
 Current goal: ${goalDescription || "Explore quietly and notice only important changes."}
@@ -38,7 +38,8 @@ Return one compact JSON object:
     "speech": "brief, uncertainty-calibrated guidance or empty string"
   }
 }
-Omit bbox unless you can genuinely localize the object. Coordinates must be normalized to 0..1. Do not include markdown.`;
+Omit bbox unless you can genuinely localize the object. Coordinates must be normalized to 0..1. Do not include markdown.
+${compact ? "Latency budget: return at most 6 recognizable objects, prioritizing the requested target and useful everyday items. Use a short sceneSummary, omit optional aliases, attributes, and spatialRelation unless needed to answer the question, and leave text empty unless reading is requested. Complete the JSON within 600 tokens; do not exhaustively inventory the image." : ""}`;
 }
 
 export const OCR_SYSTEM_PROMPT = `You are the OCR specialist for SightLoop. Analyze only the supplied image. Never invent or repair unreadable text.

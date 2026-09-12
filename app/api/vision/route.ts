@@ -31,12 +31,13 @@ export async function POST(request: Request) {
     const plan = selectVisionRoute(meta.purpose, meta.detailTier);
     const raw = await callQwenVision({
       imageDataUrl: dataUrl,
-      prompt: visionPrompt((meta.goal ?? "").slice(0, 300), (meta.recentContext ?? "").slice(0, 1_000), detailed),
+      prompt: visionPrompt((meta.goal ?? "").slice(0, 300), (meta.recentContext ?? "").slice(0, 1_000), detailed, meta.detailTier !== "max"),
       model: plan.model,
       frameId: meta.frameId,
       timeoutMs: plan.timeoutMs,
       maxTokens: plan.maxTokens,
       maxPixels: plan.maxPixels,
+      signal: request.signal,
     });
     return NextResponse.json(normalizeObservation(raw, meta, detailed ? "deep_vision" : "realtime", plan.model));
   } catch (error) {

@@ -3,7 +3,7 @@ import { getServerEnv } from "../../config/env.ts";
 import { logger } from "../../lib/logger.ts";
 import { VISION_RESPONSE_FORMAT } from "./VisionSchema.ts";
 
-export type QwenErrorCode = "provider_auth" | "provider_rate_limit" | "provider_timeout" | "provider_response" | "invalid_json";
+export type QwenErrorCode = "provider_auth" | "provider_rate_limit" | "provider_timeout" | "provider_response" | "invalid_json" | "request_cancelled";
 
 export class QwenRequestError extends Error {
   constructor(message: string, readonly code: QwenErrorCode, readonly providerStatus?: number) {
@@ -55,10 +55,14 @@ export async function callQwenVision(input: {
   timeoutMs: number;
   maxTokens?: number;
   maxPixels?: number;
+  signal?: AbortSignal;
 }) {
   const { DASHSCOPE_API_KEY } = getServerEnv();
   if (!DASHSCOPE_API_KEY) throw new Error("DASHSCOPE_API_KEY is not configured");
   const controller = new AbortController();
+  const forwardAbort = () => controller.abort("request_cancelled");
+  input.signal?.addEventListener("abort", forwardAbort, { once: true });
+  if (input.signal?.aborted) forwardAbort();
   const timeout = setTimeout(() => controller.abort("provider_timeout"), input.timeoutMs);
   const startedAt = Date.now();
   try {
@@ -94,6 +98,7 @@ export async function callQwenVision(input: {
     logger.info("qwen_request_complete", { frameId: input.frameId, model: input.model, latencyMs: Date.now() - startedAt });
     return parseJsonContent(payload.choices?.[0]?.message?.content);
   } catch (error) {
+    if (input.signal?.aborted) throw new QwenRequestError("Vision request cancelled", "request_cancelled");
     if (controller.signal.aborted) {
       logger.error("qwen_request_timeout", { frameId: input.frameId, model: input.model, latencyMs: Date.now() - startedAt });
       throw new QwenRequestError("Qwen vision request timed out", "provider_timeout");
@@ -103,6 +108,7 @@ export async function callQwenVision(input: {
     throw new QwenRequestError("Qwen vision request failed", "provider_response");
   } finally {
     clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", forwardAbort);
   }
 }
 

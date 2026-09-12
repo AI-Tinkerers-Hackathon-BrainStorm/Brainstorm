@@ -11,10 +11,10 @@ export interface VisionRoutePlan {
 
 export function selectVisionRoute(purpose: "background" | "detailed", detailTier?: VisionDetailTier): VisionRoutePlan {
   if (purpose === "background") {
-    return { model: MODELS.deepVision, timeoutMs: 12_000, maxTokens: 900, maxPixels: 1_048_576 };
+    return { model: MODELS.deepVision, timeoutMs: 12_000, maxTokens: 1_000, maxPixels: 1_048_576 };
   }
   if (detailTier === "max") {
     return { model: MODELS.deepVisionMax, timeoutMs: 32_000, maxTokens: 1_800, maxPixels: 2_621_440 };
   }
-  return { model: MODELS.deepVision, timeoutMs: 13_000, maxTokens: 1_000, maxPixels: 1_572_864 };
+  return { model: MODELS.deepVision, timeoutMs: 20_000, maxTokens: 1_000, maxPixels: 1_048_576 };
 }

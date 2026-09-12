@@ -25,7 +25,7 @@ export class QwenDeepVisionProvider implements DeepVisionProvider {
   constructor(private readonly fetcher: Fetcher = fetch) {}
 
   analyzeFast(frame: EncodedFrame, goal = "Systematically describe the current view, including small recognizable objects", signal?: AbortSignal) {
-    return this.analyze(frame, goal, "fast", 16_000, signal);
+    return this.analyze(frame, goal, "fast", 23_000, signal);
   }
 
   analyzeMax(frame: EncodedFrame, goal = "Systematically describe the current view, including small recognizable objects", signal?: AbortSignal) {
@@ -33,6 +33,7 @@ export class QwenDeepVisionProvider implements DeepVisionProvider {
   }
 
   private async analyze(frame: EncodedFrame, goal: string, detailTier: VisionDetailTier, timeoutMs: number, signal?: AbortSignal) {
+    if (signal?.aborted) throw abortError(signal.reason);
     const form = new FormData();
     form.set("frame", frame.blob, `${frame.frameId}.jpg`);
     form.set("metadata", JSON.stringify({ frameId: frame.frameId, capturedAt: frame.capturedAt, requestSentAt: Date.now(), purpose: "detailed", detailTier, goal }));
@@ -50,9 +51,12 @@ export class QwenDeepVisionProvider implements DeepVisionProvider {
         } catch { /* Status-derived category remains available. */ }
         throw new VisionClientError(`${detailTier} vision failed (${response.status})`, code, response.status);
       }
-      return response.json() as Promise<VisionObservation>;
-    } catch (error) {
+      const observation = await response.json() as VisionObservation;
       if (controller.signal.aborted) throw abortError(controller.signal.reason);
+      return observation;
+    } catch (error) {
+      if (signal?.aborted) throw abortError(signal.reason);
+      if (controller.signal.aborted) throw new VisionClientError(`${detailTier} vision timed out`, "provider_timeout");
       if (error instanceof VisionClientError) throw error;
       throw new VisionClientError(`${detailTier} vision network request failed`, "network_error");
     } finally {
@@ -63,9 +67,8 @@ export class QwenDeepVisionProvider implements DeepVisionProvider {
 }
 
 export function shouldTryMaxAfterFastFailure(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return false;
-  if (!(error instanceof VisionClientError)) return true;
-  return error.code !== "provider_auth" && error.code !== "provider_rate_limit";
+  // A slower model cannot repair a network timeout, missing access, or overload.
+  return error instanceof VisionClientError && error.code === "invalid_json";
 }
 
 export async function runFastWithMaxFallback<T>(runFast: () => Promise<T>, runMax: () => Promise<T>): Promise<{ value: T; usedMaxFallback: boolean }> {

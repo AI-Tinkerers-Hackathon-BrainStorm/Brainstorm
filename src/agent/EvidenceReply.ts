@@ -3,6 +3,17 @@ import { isTransientBodyPart, prefersChinese, queryMatchesSubject } from "./Obje
 
 const STRUCTURAL_LABEL = /^(?:wall|floor|ceiling|room|surface|background|墙|地面|天花板|房间|背景)$/i;
 
+export function detailedObservationSpeech(observation: VisionObservation, now = Date.now()): string {
+  const ageSeconds = Math.max(0, Math.round((now - observation.capturedAt) / 1_000));
+  const labels = [...new Set(observation.objects.filter((item) => item.confidence >= 0.45).map(namedObject))].slice(0, 12);
+  const inventory = labels.length ? ` I identified: ${labels.join(", ")}.` : "";
+  const description = `${observation.sceneSummary}${inventory}`;
+  if (observation.freshness === "STALE" || ageSeconds > 7) {
+    return `In the frame captured ${ageSeconds} seconds ago: ${description} I can’t confirm those items are still visible.`;
+  }
+  return description;
+}
+
 export function hasUsefulObjectInventory(observation: VisionObservation, target?: string, color?: string): boolean {
   const useful = observation.objects.filter((object) => object.confidence >= 0.45
     && !isTransientBodyPart(object.label)

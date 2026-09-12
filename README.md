@@ -23,7 +23,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Agent design](docs/AGENT_DESIGN.md), 
 Requirements: Node.js 22.13 or newer and an Alibaba Cloud Model Studio API key.
 
 1. Copy `.env.example` to `.env.local`.
-2. Add `DASHSCOPE_API_KEY`.
+2. Add `DASHSCOPE_API_KEY`. To enable Qwen WebRTC rather than browser fallback, also set the workspace-specific `DASHSCOPE_BASE_URL` described in the API setup guide.
 3. Run `npm ci`.
 
 See [API setup](docs/API_SETUP.md) for region and model overrides.
@@ -47,7 +47,7 @@ npm run build
 
 ## Deploy to Vercel
 
-Import the repository into Vercel as a Next.js project. Add `DASHSCOPE_API_KEY` (and, when used, `DASHSCOPE_BASE_URL` and model overrides) to Production, Preview, and Development environments. Deploy without a custom build override; Vercel will run the Next.js build. The HTTPS deployment can request camera, microphone, speaker, vibration, and PWA installation permissions.
+Import the repository into Vercel as a Next.js project. Add `DASHSCOPE_API_KEY` and the workspace-specific `DASHSCOPE_BASE_URL` to Production, Preview, and Development environments; model overrides remain optional. Deploy without a custom build override; Vercel will run the Next.js build. The HTTPS deployment can request camera, microphone, speaker, vibration, and PWA installation permissions.
 
 ## Model routing
 

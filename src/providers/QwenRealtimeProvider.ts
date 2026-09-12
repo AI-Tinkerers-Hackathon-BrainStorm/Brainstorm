@@ -46,6 +46,34 @@ export function shouldEmitRealtimeAgentOutput(responseSuppressed: boolean): bool
   return !responseSuppressed;
 }
 
+export function createRealtimeSessionUpdate(now = Date.now()) {
+  return {
+    event_id: `event-${now}`,
+    type: "session.update",
+    session: {
+      modalities: ["text", "audio"],
+      voice: "Ethan",
+      instructions: REALTIME_AGENT_SYSTEM_PROMPT,
+      input_audio_format: "pcm",
+      output_audio_format: "pcm",
+      input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
+      turn_detection: { type: "semantic_vad", prefix_padding_ms: 350, silence_duration_ms: 500 },
+      temperature: 0.35,
+      max_tokens: 300,
+      tools: [
+        { type: "function", function: { name: "set_goal", description: "Set a continuing find, remember, monitor, or reading task.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
+        { type: "function", function: { name: "clear_goal", description: "Stop the current visual task.", parameters: { type: "object", properties: {} } } },
+        { type: "function", function: { name: "remember_event", description: "Save a useful structured last-seen visual event.", parameters: { type: "object", properties: { subject: { type: "string" }, action: { type: "string" }, location: { type: "string" }, confidence: { type: "number" } }, required: ["subject", "action", "confidence"] } } },
+        { type: "function", function: { name: "recall_memory", description: "Recall the latest structured event for a subject.", parameters: { type: "object", properties: { subject: { type: "string" } }, required: ["subject"] } } },
+        { type: "function", function: { name: "request_deep_vision", description: "Run one high-resolution detailed current-scene inventory.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
+        { type: "function", function: { name: "request_ocr", description: "Capture and read text from the current view.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
+        { type: "function", function: { name: "vibrate", description: "Trigger accessible haptic guidance.", parameters: { type: "object", properties: { pattern: { type: "string", enum: ["LEFT", "RIGHT", "FOUND", "WARNING"] } }, required: ["pattern"] } } },
+        { type: "function", function: { name: "announce", description: "Speak a brief, safety-calibrated message.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } },
+      ],
+    },
+  };
+}
+
 function errorCategory(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown_error";
   return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 180);
@@ -104,6 +132,8 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       const response = await this.fetcher("/api/health", { cache: "no-store" });
       if (!response.ok) throw new Error(`provider_health_${response.status}`);
       providerAvailable = true;
+      const health = await response.clone().json().catch(() => undefined) as { realtimeConfigured?: boolean; realtimeIssue?: string } | undefined;
+      if (health?.realtimeConfigured === false) throw new Error(health.realtimeIssue ?? "realtime_not_configured");
       await this.connectWebRtc();
       if (!canReportWebRtcConnected(this.telemetry.peerConnectionState, this.telemetry.iceConnectionState, this.telemetry.dataChannelState, this.telemetry.realtimeVideoTrackState, this.telemetry.realtimeSessionState)) {
         throw new Error("webrtc_not_ready");
@@ -316,11 +346,14 @@ export class QwenRealtimeProvider implements RealtimeProvider {
   }
 
   private bindDataChannel(channel: RTCDataChannel): void {
+    const peer = this.peer;
     const activate = () => {
       if (!this.channel || channel.label === "txt") this.channel = channel;
       this.updateTransportTelemetry();
     };
-    channel.addEventListener("message", (event) => this.handleRealtimeEvent(event.data, channel));
+    channel.addEventListener("message", (event) => {
+      if (this.peer === peer && !this.disconnecting) this.handleRealtimeEvent(event.data, channel);
+    });
     channel.addEventListener("open", activate);
     channel.addEventListener("close", () => {
       if (this.channel !== channel) return;
@@ -345,33 +378,7 @@ export class QwenRealtimeProvider implements RealtimeProvider {
   private sendSessionUpdate(channel: RTCDataChannel): void {
     if (this.sessionUpdateSent || channel.readyState !== "open") return;
     this.sessionUpdateSent = true;
-    channel.send(JSON.stringify({
-      event_id: `event-${Date.now()}`,
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        voice: "Ethan",
-        instructions: REALTIME_AGENT_SYSTEM_PROMPT,
-        audio: {
-          input: { format: { type: "pcm", sample_rate: 16_000 } },
-          output: { format: { type: "pcm", sample_rate: 24_000 } },
-        },
-        input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
-        turn_detection: { type: "semantic_vad", prefix_padding_ms: 350, silence_duration_ms: 500 },
-        temperature: 0.35,
-        max_tokens: 300,
-        tools: [
-          { type: "function", function: { name: "set_goal", description: "Set a continuing find, remember, monitor, or reading task.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
-          { type: "function", function: { name: "clear_goal", description: "Stop the current visual task.", parameters: { type: "object", properties: {} } } },
-          { type: "function", function: { name: "remember_event", description: "Save a useful structured last-seen visual event.", parameters: { type: "object", properties: { subject: { type: "string" }, action: { type: "string" }, location: { type: "string" }, confidence: { type: "number" } }, required: ["subject", "action", "confidence"] } } },
-          { type: "function", function: { name: "recall_memory", description: "Recall the latest structured event for a subject.", parameters: { type: "object", properties: { subject: { type: "string" } }, required: ["subject"] } } },
-          { type: "function", function: { name: "request_deep_vision", description: "Run one high-resolution detailed current-scene inventory.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
-          { type: "function", function: { name: "request_ocr", description: "Capture and read text from the current view.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
-          { type: "function", function: { name: "vibrate", description: "Trigger accessible haptic guidance.", parameters: { type: "object", properties: { pattern: { type: "string", enum: ["LEFT", "RIGHT", "FOUND", "WARNING"] } }, required: ["pattern"] } } },
-          { type: "function", function: { name: "announce", description: "Speak a brief, safety-calibrated message.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } },
-        ],
-      },
-    }));
+    channel.send(JSON.stringify(createRealtimeSessionUpdate()));
   }
 
   protected async connectWebRtc(): Promise<void> {
@@ -533,12 +540,24 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       if (event.type === "session.created") {
         this.channel = sourceChannel;
         this.updateTelemetry({ realtimeSessionState: "created" });
+        this.mediaEnablePromise ??= this.enableRealtimeMedia?.() ?? Promise.reject(new Error("webrtc_media_gate_unavailable"));
+        void this.mediaEnablePromise.catch((error) => {
+          if (this.channel !== sourceChannel || this.disconnecting) return;
+          this.updateTelemetry({ lastError: `webrtc_media_enable:${errorCategory(error)}` });
+          this.setState("FALLBACK");
+          this.closePeer();
+        });
         this.sendSessionUpdate(sourceChannel);
       } else if (event.type === "session.updated") {
+        if (!this.sessionUpdateSent) return;
         this.channel = sourceChannel;
-        this.mediaEnablePromise ??= (this.enableRealtimeMedia?.() ?? Promise.reject(new Error("webrtc_media_gate_unavailable")))
-          .then(() => this.updateTelemetry({ realtimeSessionState: "ready" }))
+        this.mediaEnablePromise ??= this.enableRealtimeMedia?.() ?? Promise.reject(new Error("webrtc_media_gate_unavailable"));
+        void this.mediaEnablePromise
+          .then(() => {
+            if (this.channel === sourceChannel && !this.disconnecting) this.updateTelemetry({ realtimeSessionState: "ready" });
+          })
           .catch((error) => {
+            if (this.channel !== sourceChannel || this.disconnecting) return;
             this.updateTelemetry({ lastError: `webrtc_media_enable:${errorCategory(error)}` });
             this.setState("FALLBACK");
             this.closePeer();

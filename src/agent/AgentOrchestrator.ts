@@ -144,7 +144,7 @@ export class AgentOrchestrator {
   cacheDetailedObservation(observation: VisionObservation): CachedDetailedScene {
     const cached = this.detailedSceneMemory.add(observation);
     this.episodicMemory.recordDetailedScene(cached);
-    this.tools.log("memory", "Max detailed scene cached", `${cached.model} · captured ${cached.capturedAt}`);
+    this.tools.log("memory", "Detailed scene cached as last-seen", `${cached.model} · captured ${cached.capturedAt}`);
     return cached;
   }
 

@@ -26,7 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { AgentOrchestrator, type AgentSnapshot } from "@/src/agent/AgentOrchestrator.ts";
-import { hasUsefulObjectInventory, scanAddsNewObjects } from "@/src/agent/EvidenceReply.ts";
+import { detailedObservationSpeech, scanAddsNewObjects } from "@/src/agent/EvidenceReply.ts";
 import { parseUserIntent } from "@/src/agent/GoalParser.ts";
 import { ASR_WATCHDOG_MS, shouldFallbackUnansweredTurn } from "@/src/agent/TurnWatchdog.ts";
 import { AudioManager, shouldUseSpeechSynthesis, type TranscriptTiming } from "@/src/media/AudioManager.ts";
@@ -80,12 +80,6 @@ function latency(start?: number, end?: number) {
   return start !== undefined && end !== undefined && end >= start ? `${end - start} ms` : "—";
 }
 
-function detailedObservationSpeech(observation: VisionObservation) {
-  if (observation.freshness === "STALE") return "The detailed scan returned too late to describe the current view. Please scan again.";
-  const labels = [...new Set(observation.objects.filter((item) => item.confidence >= 0.45).map((item) => item.color ? `${item.color} ${item.label}` : item.label))].slice(0, 16);
-  return labels.length ? `${observation.sceneSummary} I identified: ${labels.join(", ")}.` : observation.sceneSummary;
-}
-
 function cachedDetailedSpeech(scene: CachedDetailedScene) {
   const labels = [...new Set(scene.objects.filter((item) => item.confidence >= 0.45).map((item) => item.color ? `${item.color} ${item.label}` : item.label))].slice(0, 12);
   const inventory = labels.length ? ` It included: ${labels.join(", ")}.` : "";
@@ -96,7 +90,7 @@ function visionFailureMessage(error: unknown) {
   if (!(error instanceof VisionClientError)) return "Scan failed. The camera preview is still available; try once more.";
   if (error.code === "provider_auth") return "Visual analysis is not authorized for this model. Check the DashScope key, workspace, and model access.";
   if (error.code === "provider_rate_limit") return "Visual analysis is temporarily rate-limited. Wait a moment and try again.";
-  if (error.code === "provider_timeout") return "Visual analysis took too long. The fast and detailed paths will retry on the next scan.";
+  if (error.code === "provider_timeout") return "Visual analysis took too long. The camera is still active; try another scan.";
   if (error.code === "invalid_json") return "The visual model answered, but its structured result could not be validated. Try the scan again.";
   return "Visual analysis could not reach the model. The camera preview remains active.";
 }
@@ -186,7 +180,7 @@ export function SightLoopApp() {
   }, [persistAgentSnapshot]);
 
   const createSampler = useCallback(() => {
-    if (!videoRef.current || lowBandwidthRef.current || samplerRef.current) return;
+    if (!videoRef.current || !cameraRef.current.active || lowBandwidthRef.current || samplerRef.current || scanPromiseRef.current || refinementPromiseRef.current) return;
     const sampler = new FrameSampler(videoRef.current, async (frame, encodeMs) => {
       const monitor = performanceMonitor;
       monitor.encoded(encodeMs);
@@ -543,7 +537,6 @@ export function SightLoopApp() {
         const goal = requestedGoal ?? (current ? goalLabel(current) : undefined);
         let observation: VisionObservation;
         let usedMaxFallback = false;
-        let maxAttempted = false;
         if (useOcr) {
           observation = await ocrRef.current.read(frame, controller.signal);
         } else {
@@ -553,43 +546,41 @@ export function SightLoopApp() {
           );
           observation = result.value;
           usedMaxFallback = result.usedMaxFallback;
-          maxAttempted = usedMaxFallback;
-          if (!usedMaxFallback && !hasUsefulObjectInventory(observation, current?.goal?.target, current?.goal?.attributes.color)) {
-            maxAttempted = true;
-            try {
-              observation = await deepVisionRef.current.analyzeMax(frame, goal, controller.signal);
-              usedMaxFallback = true;
-            } catch (cause) {
-              orchestratorRef.current?.tools.log("error", "Max scan could not improve a weak result", cause instanceof Error ? cause.message.slice(0, 120) : "unknown_error");
-            }
-          }
           if (usedMaxFallback) {
             orchestratorRef.current?.tools.log("system", "Fast scan fallback used", "Max completed the scan");
-            cacheMaxObservation(observation);
           }
         }
+        if (controller.signal.aborted) throw new DOMException("Scan superseded", "AbortError");
+        if (!useOcr) cacheDetailedObservation(observation);
         performanceMonitor.requestFinished(Date.now() - startedAt);
+        orchestratorRef.current?.tools.log("system", "Scan completed", `${frame.frameId} · ${observation.model ?? (useOcr ? "ocr" : "vision")} · ${Date.now() - startedAt} ms · captured ${Date.now() - frame.capturedAt} ms ago`);
         handleObservation(observation);
-        if (!useOcr && !usedMaxFallback && !maxAttempted) startMaxRefinement(frame, goal, resumeAutomatic, userTurnSequenceRef.current);
+        if (!useOcr && !usedMaxFallback) startMaxRefinement(frame, goal, resumeAutomatic);
         return observation;
       } catch (cause) {
         const aborted = controller.signal.aborted || (cause as Error).name === "AbortError";
         performanceMonitor.requestFinished(Date.now() - startedAt, !aborted);
         if (!aborted) {
+          orchestratorRef.current?.tools.log("error", "Scan unavailable", `${cause instanceof VisionClientError ? cause.code : "capture_or_scan_failed"} · ${Date.now() - startedAt} ms`);
           setError(visionFailureMessage(cause));
         }
         return undefined;
       } finally {
         setScanning(false);
         setPerformance(performanceMonitor.snapshot());
-        if (resumeAutomatic && !lowBandwidthRef.current) createSampler();
+        const next = orchestratorRef.current?.snapshot();
+        if (next) setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory], detailedScenes: [...next.detailedScenes] });
       }
     })();
     scanPromiseRef.current = task;
-    return task.finally(() => { if (scanPromiseRef.current === task) scanPromiseRef.current = null; });
+    return task.finally(() => {
+      if (scanPromiseRef.current !== task) return;
+      scanPromiseRef.current = null;
+      if (resumeAutomatic && !lowBandwidthRef.current) createSampler();
+    });
   }
 
-  function cacheMaxObservation(observation: VisionObservation) {
+  function cacheDetailedObservation(observation: VisionObservation) {
     const agent = orchestratorRef.current;
     if (!agent) return;
     agent.cacheDetailedObservation(observation);
@@ -598,7 +589,7 @@ export function SightLoopApp() {
     persistAgentSnapshot(next);
   }
 
-  function startMaxRefinement(frame: Awaited<ReturnType<typeof captureHighResolution>>, goal: string | undefined, resumeAutomatic: boolean, turnSequence: number) {
+  function startMaxRefinement(frame: Awaited<ReturnType<typeof captureHighResolution>>, goal: string | undefined, resumeAutomatic: boolean) {
     refinementAbortRef.current?.abort("superseded_by_new_refinement");
     const controller = new AbortController();
     refinementAbortRef.current = controller;
@@ -606,8 +597,8 @@ export function SightLoopApp() {
     const task = (async () => {
       try {
         const observation = await deepVisionRef.current.analyzeMax(frame, goal, controller.signal);
-        cacheMaxObservation(observation);
-        if (turnSequence === userTurnSequenceRef.current && observation.freshness === "FRESH") handleObservation(observation);
+        if (controller.signal.aborted) return;
+        cacheDetailedObservation(observation);
         orchestratorRef.current?.tools.log("system", "Max refinement complete", `${observation.model ?? "max vision"} · ${Date.now() - startedAt} ms`);
       } catch (cause) {
         const aborted = controller.signal.aborted || (cause as Error).name === "AbortError";
