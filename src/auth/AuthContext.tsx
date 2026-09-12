@@ -30,9 +30,19 @@ export function AuthContextProvider({ children }: { children: ReactNode }) {
   // localStorage is unavailable during server rendering, so the session is
   // restored after mount. "loading" prevents a hydration mismatch.
   useEffect(() => {
-    const session = providerRef.current.restore();
-    setUser(session?.user);
-    setStatus(session ? "authenticated" : "unauthenticated");
+    let active = true;
+    void providerRef.current.restore()
+      .then((session) => {
+        if (!active) return;
+        setUser(session?.user);
+        setStatus(session ? "authenticated" : "unauthenticated");
+      })
+      .catch(() => {
+        if (!active) return;
+        setUser(undefined);
+        setStatus("unauthenticated");
+      });
+    return () => { active = false; };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
@@ -54,9 +64,12 @@ export function AuthContextProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    await providerRef.current.signOut();
-    setUser(undefined);
-    setStatus("unauthenticated");
+    try {
+      await providerRef.current.signOut();
+    } finally {
+      setUser(undefined);
+      setStatus("unauthenticated");
+    }
   }, []);
 
   const value = useMemo<AuthApi>(() => ({

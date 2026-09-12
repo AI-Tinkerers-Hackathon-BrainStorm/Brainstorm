@@ -6,7 +6,7 @@ export const VISION_RESPONSE_FORMAT = {
     schema: {
       type: "object",
       additionalProperties: false,
-      required: ["sceneSummary", "cameraMotion", "objects", "text", "goalAssessment"],
+      required: ["sceneSummary", "cameraMotion", "objects", "placementEvents", "text", "goalAssessment"],
       properties: {
         sceneSummary: { type: "string" },
         cameraMotion: { type: "string", enum: ["low", "medium", "high"] },
@@ -20,6 +20,7 @@ export const VISION_RESPONSE_FORMAT = {
               label: { type: "string" },
               aliases: { type: "array", items: { type: "string" } },
               color: { type: "string" },
+              appearance: { type: "string" },
               attributes: { type: "array", items: { type: "string" } },
               spatialRelation: { type: "array", items: { type: "string" } },
               bbox: {
@@ -28,6 +29,25 @@ export const VISION_RESPONSE_FORMAT = {
                 required: ["x1", "y1", "x2", "y2"],
                 properties: { x1: { type: "number" }, y1: { type: "number" }, x2: { type: "number" }, y2: { type: "number" } },
               },
+              confidence: { type: "number" },
+            },
+          },
+        },
+        placementEvents: {
+          type: "array",
+          maxItems: 4,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["type", "subject", "relation", "anchor", "location", "confidence"],
+            properties: {
+              type: { type: "string", enum: ["PUT_DOWN"] },
+              subject: { type: "string" },
+              relation: { type: "string" },
+              anchor: { type: "string" },
+              location: { type: "string" },
+              appearance: { type: "string" },
+              color: { type: "string" },
               confidence: { type: "number" },
             },
           },
@@ -53,11 +73,12 @@ export const VISION_RESPONSE_FORMAT = {
         goalAssessment: {
           type: "object",
           additionalProperties: false,
-          required: ["relevant", "targetVisible", "candidateConfidence", "shouldSpeak"],
+          required: ["relevant", "targetVisible", "candidateConfidence", "candidateObjectIndex", "shouldSpeak"],
           properties: {
             relevant: { type: "boolean" },
             targetVisible: { type: "boolean" },
             candidateConfidence: { type: "number" },
+            candidateObjectIndex: { type: "integer", minimum: -1, maximum: 29 },
             spatialPosition: { type: "string", enum: ["far-left", "left", "center-left", "center", "center-right", "right", "far-right"] },
             guidance: { type: "string", enum: ["LEFT", "RIGHT", "CENTER", "HOLD", "NONE"] },
             shouldSpeak: { type: "boolean" },

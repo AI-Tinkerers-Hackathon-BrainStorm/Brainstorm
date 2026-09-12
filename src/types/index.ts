@@ -32,10 +32,22 @@ export interface DetectedObject {
   bbox?: NormalizedBBox;
   center?: { x: number; y: number };
   color?: string;
+  appearance?: string;
   attributes?: string[];
   spatialRelation?: string[];
   confidence: number;
   source: "realtime" | "deep_vision" | "ocr" | "temporal_inference";
+}
+
+export interface PlacementObservation {
+  type: "PUT_DOWN";
+  subject: string;
+  relation: string;
+  anchor: string;
+  location: string;
+  appearance?: string;
+  color?: string;
+  confidence: number;
 }
 
 export interface OCRText {
@@ -48,6 +60,8 @@ export interface GoalAssessment {
   relevant: boolean;
   targetVisible: boolean;
   candidateConfidence: number;
+  /** Index into the observation's objects array, or omitted when no candidate is visible. */
+  candidateObjectIndex?: number;
   spatialPosition?: SpatialPosition;
   guidance?: "LEFT" | "RIGHT" | "CENTER" | "HOLD" | "NONE";
   shouldSpeak: boolean;
@@ -87,6 +101,7 @@ export interface VisionObservation {
   cameraMotion?: "low" | "medium" | "high";
   source: "realtime" | "deep_vision" | "ocr" | "temporal_inference";
   goalAssessment?: GoalAssessment;
+  placementEvents?: PlacementObservation[];
   events?: TemporalEvent[];
   model?: string;
 }
@@ -141,11 +156,30 @@ export interface MemoryEvent {
   subject: string;
   action: string;
   location?: string;
+  relation?: string;
+  anchor?: string;
+  appearance?: string;
   attributes?: Record<string, unknown>;
   confidence: number;
   evidence: { frameIds: string[]; observationIds: string[] };
   lastConfirmedAt?: number;
   epistemic: Exclude<EpistemicState, "CURRENTLY_VISIBLE">;
+}
+
+export interface RecentObjectMemoryRecord {
+  identityKey: string;
+  label: string;
+  aliases?: string[];
+  color?: string;
+  appearance?: string;
+  attributes?: string[];
+  spatialRelation?: string[];
+  confidence: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  seenCount: number;
+  evidence: { frameIds: string[]; observationIds: string[] };
+  epistemic: "LAST_SEEN";
 }
 
 export interface TimelineEntry {

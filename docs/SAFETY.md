@@ -15,9 +15,9 @@ SightLoop is experimental assistance, not a certified navigation or collision-av
 
 ## Data handling
 
-Raw camera video is neither recorded nor persisted. Sampled frames go directly to DashScope for inference and are not written to application storage. The in-browser working-memory ring is bounded and disappears with the page. Optional persistent memory contains only structured events such as an item, relation, timestamp, confidence, and evidence IDs. Bounded Max scene refinements may also be cached on-device as structured `LAST_SEEN` summaries; they are never promoted to current visibility after their frame becomes stale.
+Raw camera video is neither recorded nor persisted. Sampled frames go directly to DashScope for inference and are not written to application storage. The in-browser working-memory ring is bounded and disappears with the page. Supabase receives only bounded structured object sightings and important events: labels, appearance cues, relations, anchors, timestamps, confidence, and non-image evidence IDs. It never receives frames, video, image data URLs, full provider payloads, or OCR transcripts. Bounded Max scene refinements remain cached on-device as structured `LAST_SEEN` summaries and are never promoted to current visibility after their frame becomes stale.
 
-Long-lived keys stay in Vercel/server environment variables. Logs contain only frame IDs, model names, timestamps, latency, status, and error categories.
+Long-lived model keys stay in Vercel/server environment variables. The browser receives only Supabase's publishable key. Supabase Anonymous Auth provides a real `auth.uid()`; both memory tables enforce owner-scoped RLS and expose direct reads only, while bounded security-definer RPCs derive the owner from the JWT. No service-role key is shipped. The store pins the session UID and refuses writes if it changes. Public deployments must enable CAPTCHA and Auth rate limits. Logs contain only frame IDs, model names, timestamps, latency, status, and error categories.
 
 ## User-facing behavior
 

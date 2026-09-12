@@ -38,12 +38,16 @@ import { QwenDeepVisionProvider, runFastWithMaxFallback, VisionClientError } fro
 import { QwenOCRProvider } from "@/src/providers/OCRProvider.ts";
 import { QwenRealtimeProvider } from "@/src/providers/QwenRealtimeProvider.ts";
 import { useAuth } from "@/src/auth/AuthContext";
+import { SupabaseMemoryStore, type MemorySyncStatus } from "@/src/memory/SupabaseMemoryStore.ts";
+import type { RecentObjectMemoryRecord } from "@/src/memory/RecentObjectMemory.ts";
 import { announce } from "@/src/tools/announce.ts";
 import { vibrate, type HapticPattern } from "@/src/tools/vibration.ts";
 import type { CachedDetailedScene, ConnectionState, MemoryEvent, PerformanceSnapshot, RealtimeTelemetry, VisionObservation } from "@/src/types/index.ts";
 
 type ChatItem = { id: string; role: "agent" | "user" | "system"; text: string; timestamp: number };
 type CameraState = "ready" | "starting" | "live" | "error";
+
+const SIGN_OUT_FLUSH_TIMEOUT_MS = 3_000;
 
 const initialPerformance: PerformanceSnapshot = {
   quality: "HIGH", aiFps: 1, previewHeight: 720, visionLatencyMs: 0,
@@ -62,7 +66,7 @@ const initialRealtimeTelemetry: RealtimeTelemetry = {
 };
 
 const initialSnapshot: AgentSnapshot = {
-  mode: "IDLE", status: "LISTENING", timeline: [], memory: [], detailedScenes: [], confirmationCount: 0,
+  mode: "IDLE", status: "LISTENING", timeline: [], memory: [], recentObjects: [], detailedScenes: [], confirmationCount: 0,
 };
 
 function timeLabel(timestamp: number) {
@@ -74,6 +78,19 @@ function goalLabel(snapshot: AgentSnapshot) {
   const color = snapshot.goal.attributes.color;
   const verb = snapshot.goal.type === "find" ? "Find" : snapshot.goal.type === "read" ? "Read" : snapshot.goal.type === "remember" ? "Remember" : snapshot.goal.type === "review" ? "Review" : "Watch";
   return `${verb} ${color ? `${color} ` : ""}${snapshot.goal.target}`;
+}
+
+function visionGoalDescription(snapshot: AgentSnapshot): string {
+  const base = goalLabel(snapshot);
+  if (snapshot.goal?.attributes.memorySearch !== "true") return base;
+  const cues = [
+    snapshot.goal.attributes.color ? `color: ${snapshot.goal.attributes.color}` : "",
+    snapshot.goal.attributes.appearance ? `appearance: ${snapshot.goal.attributes.appearance}` : "",
+    snapshot.goal.attributes.lastSeenRelation && snapshot.goal.attributes.lastSeenAnchor
+      ? `last seen ${snapshot.goal.attributes.lastSeenRelation} ${snapshot.goal.attributes.lastSeenAnchor}`
+      : "",
+  ].filter(Boolean);
+  return `${base}. Memory-assisted re-identification; only mark a candidate visible when it matches these remembered cues: ${cues.join("; ") || "object description unavailable"}.`;
 }
 
 function latency(start?: number, end?: number) {
@@ -102,7 +119,7 @@ function visionFailureMessage(error: unknown) {
 }
 
 export function SightLoopApp() {
-  // Each signed-in user keeps a separate episodic-memory namespace.
+  // The local key is an offline cache; Supabase auth.uid() owns cloud rows.
   const { user, signOut, memoryKey } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraRef = useRef(new CameraManager());
@@ -114,6 +131,7 @@ export function SightLoopApp() {
   const [performanceMonitor] = useState(() => new PerformanceMonitor(qualityController));
   const samplerRef = useRef<FrameSampler | null>(null);
   const orchestratorRef = useRef<AgentOrchestrator | null>(null);
+  const memoryStoreRef = useRef<SupabaseMemoryStore | null>(null);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPromiseRef = useRef<Promise<VisionObservation | undefined> | null>(null);
   const refinementAbortRef = useRef<AbortController | null>(null);
@@ -130,6 +148,7 @@ export function SightLoopApp() {
   const [connection, setConnection] = useState<ConnectionState>("OFFLINE");
   const [realtimeTelemetry, setRealtimeTelemetry] = useState<RealtimeTelemetry>(initialRealtimeTelemetry);
   const [snapshot, setSnapshot] = useState<AgentSnapshot>(initialSnapshot);
+  const [memorySyncStatus, setMemorySyncStatus] = useState<MemorySyncStatus>("connecting");
   const [performance, setPerformance] = useState(initialPerformance);
   const [lowBandwidth, setLowBandwidth] = useState(false);
   const [listening, setListening] = useState(false);
@@ -148,9 +167,29 @@ export function SightLoopApp() {
   const persistAgentSnapshot = useCallback((value: AgentSnapshot) => {
     try {
       localStorage.setItem(memoryKey, JSON.stringify(value.memory));
+      localStorage.setItem(`${memoryKey}:recent-objects`, JSON.stringify(value.recentObjects));
       localStorage.setItem(`${memoryKey}:detailed-scenes`, JSON.stringify(value.detailedScenes));
     } catch { /* Structured memory remains available for this session. */ }
+    memoryStoreRef.current?.queueSnapshot(value);
   }, [memoryKey]);
+
+  const handleSignOut = useCallback(async () => {
+    const memoryStore = memoryStoreRef.current;
+    if (memoryStore) {
+      await Promise.race([
+        memoryStore.flush(),
+        new Promise<void>((resolve) => setTimeout(resolve, SIGN_OUT_FLUSH_TIMEOUT_MS)),
+      ]);
+      memoryStore.stop();
+      if (memoryStoreRef.current === memoryStore) memoryStoreRef.current = null;
+    }
+    try {
+      await signOut();
+    } catch {
+      // Supabase Auth removes the browser session even when its remote revoke
+      // request fails; AuthContext also clears the visible demo session.
+    }
+  }, [signOut]);
 
   // Keep the newest message in view; older ones stay reachable by scrolling up.
   useEffect(() => {
@@ -195,7 +234,7 @@ export function SightLoopApp() {
       try {
         const state = orchestratorRef.current?.snapshot();
         const recent = state?.observation?.sceneSummary ?? "";
-        await providerRef.current.sendVideoFrame(frame, { goal: state ? goalLabel(state) : undefined, recentContext: recent });
+        await providerRef.current.sendVideoFrame(frame, { goal: state ? visionGoalDescription(state) : undefined, recentContext: recent });
         backgroundFailuresRef.current = 0;
         monitor.requestFinished(Date.now() - startedAt);
       } catch (cause) {
@@ -226,17 +265,39 @@ export function SightLoopApp() {
     const provider = providerRef.current;
     const audio = audioRef.current;
     const camera = cameraRef.current;
+    let disposed = false;
     let savedMemory: MemoryEvent[] = [];
+    let savedRecentObjects: RecentObjectMemoryRecord[] = [];
     let savedDetailedScenes: CachedDetailedScene[] = [];
     try { savedMemory = JSON.parse(localStorage.getItem(memoryKey) ?? "[]") as MemoryEvent[]; } catch { savedMemory = []; }
+    try { savedRecentObjects = JSON.parse(localStorage.getItem(`${memoryKey}:recent-objects`) ?? "[]") as RecentObjectMemoryRecord[]; } catch { savedRecentObjects = []; }
     try { savedDetailedScenes = JSON.parse(localStorage.getItem(`${memoryKey}:detailed-scenes`) ?? "[]") as CachedDetailedScene[]; } catch { savedDetailedScenes = []; }
+    const memoryStore = new SupabaseMemoryStore((status) => { if (!disposed) setMemorySyncStatus(status); });
+    memoryStoreRef.current = memoryStore;
     provider.attachRemoteAudioElement(audio.getRemoteAudioElement());
     orchestratorRef.current = new AgentOrchestrator(speak, savedMemory, {
       requestDeepVision: () => scanActionRef.current(false),
       requestOcr: () => scanActionRef.current(true),
       vibrate: (input) => vibrate((typeof input === "object" && input && "pattern" in input ? String((input as { pattern: unknown }).pattern) : String(input)) as HapticPattern),
-    }, savedDetailedScenes);
+    }, savedDetailedScenes, savedRecentObjects);
     setSnapshot(orchestratorRef.current.snapshot());
+    const agent = orchestratorRef.current;
+    void memoryStore.load()
+      .then((hydrated) => {
+        if (disposed || orchestratorRef.current !== agent) return;
+        agent.hydrateMemory(hydrated.events, hydrated.recentObjects);
+        const next = agent.snapshot();
+        setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory], recentObjects: [...next.recentObjects] });
+        persistAgentSnapshot(next);
+      })
+      .catch((cause) => {
+        if (disposed || orchestratorRef.current !== agent) return;
+        agent.tools.log("error", "Cloud memory unavailable", cause instanceof Error ? cause.message.slice(0, 120) : "unknown_error");
+        setMemorySyncStatus("error");
+        setError("Cloud memory is unavailable. SightLoop is keeping a bounded local copy and will retry on new observations.");
+        const next = agent.snapshot();
+        setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory], recentObjects: [...next.recentObjects] });
+      });
     const unsubscribeObservation = provider.onObservation(handleObservation);
     const unsubscribeConnection = provider.onConnectionState(setConnection);
     const unsubscribeTelemetry = provider.onTelemetry((telemetry) => {
@@ -254,13 +315,21 @@ export function SightLoopApp() {
     });
     const unsubscribeTool = provider.onToolCall((name, input, callId) => {
       void orchestratorRef.current?.tools.dispatch(name, input)
-        .then((result) => provider.sendToolResult(callId, { ok: true, result }))
+        .then((result) => {
+          const next = orchestratorRef.current?.snapshot();
+          if (next) {
+            setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory], recentObjects: [...next.recentObjects] });
+            persistAgentSnapshot(next);
+          }
+          provider.sendToolResult(callId, { ok: true, result });
+        })
         .catch(() => {
           try { provider.sendToolResult(callId, { ok: false, error: `${name} could not be completed` }); } catch { /* The connection failure is already surfaced below. */ }
           setError(`The ${name} action could not be completed.`);
         });
     });
     return () => {
+      disposed = true;
       cameraSessionRef.current += 1;
       unsubscribeObservation();
       unsubscribeConnection();
@@ -272,14 +341,30 @@ export function SightLoopApp() {
       refinementAbortRef.current?.abort();
       void audio.close();
       camera.stop();
+      orchestratorRef.current?.setVisionActive(false);
       void provider.disconnect();
+      memoryStore.stop();
+      if (memoryStoreRef.current === memoryStore) memoryStoreRef.current = null;
     };
-  }, [handleObservation, speak, memoryKey]);
+  }, [handleObservation, persistAgentSnapshot, speak, memoryKey]);
 
   useEffect(() => {
     if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") {
       void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
+  }, []);
+
+  useEffect(() => {
+    const flushCloudMemory = () => {
+      if (document.visibilityState === "hidden") void memoryStoreRef.current?.flush();
+    };
+    const flushBeforePageHide = () => { void memoryStoreRef.current?.flush(); };
+    document.addEventListener("visibilitychange", flushCloudMemory);
+    window.addEventListener("pagehide", flushBeforePageHide);
+    return () => {
+      document.removeEventListener("visibilitychange", flushCloudMemory);
+      window.removeEventListener("pagehide", flushBeforePageHide);
+    };
   }, []);
 
   const finishUserTurn = useCallback((turnSequence: number) => {
@@ -491,12 +576,14 @@ export function SightLoopApp() {
       }
       setCameraState("live");
       providerRef.current.attachMedia(media, videoRef.current);
+      orchestratorRef.current?.setVisionActive(true);
       const videoTrack = media.getVideoTracks()[0];
       videoTrack?.addEventListener("ended", () => {
         if (cameraSession !== cameraSessionRef.current) return;
         samplerRef.current?.stop();
         samplerRef.current = null;
         setCameraState("error");
+        orchestratorRef.current?.setVisionActive(false);
         setError("The camera stream ended. Tap Try SightLoop again to reconnect it.");
         void providerRef.current.disconnect();
       }, { once: true });
@@ -507,6 +594,7 @@ export function SightLoopApp() {
       else startListening();
     } catch (cause) {
       setCameraState("error");
+      orchestratorRef.current?.setVisionActive(false);
       const name = cause instanceof DOMException ? cause.name : "CameraError";
       setError(name === "NotAllowedError" ? "Camera or microphone access was blocked. Allow both permissions in your browser settings, then try again." : "SightLoop couldn’t start the camera. Check that no other app is using it, then try again.");
     }
@@ -540,7 +628,7 @@ export function SightLoopApp() {
         const frame = await captureHighResolution(videoRef.current!);
         const current = orchestratorRef.current?.snapshot();
         const useOcr = forceOcr || current?.goal?.type === "read";
-        const goal = requestedGoal ?? (current ? goalLabel(current) : undefined);
+        const goal = requestedGoal ?? (current ? visionGoalDescription(current) : undefined);
         let observation: VisionObservation;
         let usedMaxFallback = false;
         let maxAttempted = false;
@@ -735,7 +823,7 @@ export function SightLoopApp() {
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => { void signOut(); }}
+                onClick={() => { void handleSignOut(); }}
                 aria-label={`Sign out ${user.displayName}`}
                 className="size-10 rounded-2xl"
               >
@@ -863,6 +951,8 @@ export function SightLoopApp() {
                   <dl className="space-y-3 rounded-2xl border border-border bg-card p-4 text-sm">
                     <div><dt className="font-bold text-muted-foreground">GOAL</dt><dd className="mt-1 text-base">{goalLabel(snapshot)}</dd></div>
                     <div><dt className="font-bold text-muted-foreground">OBSERVATION</dt><dd className="mt-1 text-base">{snapshot.observation?.sceneSummary ?? "No observation yet"}</dd></div>
+                    <div><dt className="font-bold text-muted-foreground">5-MINUTE OBJECT MEMORY</dt><dd className="mt-1 text-base">{snapshot.recentObjects.length ? `${snapshot.recentObjects.length} merged object${snapshot.recentObjects.length === 1 ? "" : "s"} · latest ${snapshot.recentObjects.at(-1)?.label}` : "No recent objects"}</dd></div>
+                    <div><dt className="font-bold text-muted-foreground">CLOUD MEMORY</dt><dd className="mt-1 text-base">{memorySyncStatus === "synced" ? "Supabase synced" : memorySyncStatus === "local-only" ? "Local fallback" : memorySyncStatus === "connecting" ? "Connecting to Supabase" : "Retrying after an error"}</dd></div>
                     <div><dt className="font-bold text-muted-foreground">MEMORY</dt><dd className="mt-1 text-base">{snapshot.memory.at(-1) ? `${snapshot.memory.at(-1)?.subject} · ${snapshot.memory.at(-1)?.location}` : "No saved event"}</dd></div>
                     <div><dt className="font-bold text-muted-foreground">DECISION</dt><dd className="mt-1 text-base">{snapshot.status.replace("_", " ")}{snapshot.confirmationCount ? ` · confirmation ${snapshot.confirmationCount}/2` : ""}</dd></div>
                     <div><dt className="font-bold text-muted-foreground">REALTIME TRANSPORT</dt><dd className="mt-1 text-base">{realtimeTelemetry.transport}</dd></div>
@@ -898,7 +988,7 @@ export function SightLoopApp() {
 
       <footer className="mx-auto mt-3 flex max-w-3xl items-start gap-2 px-2 py-2 text-sm leading-5 text-muted-foreground">
         <ShieldAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <p>Experimental visual assistance. Do not rely on it as your sole mobility or safety aid. Raw camera video is not stored.</p>
+        <p>Experimental visual assistance. Do not rely on it as your sole mobility or safety aid. Raw camera video is not stored; bounded structured object and placement memory may sync privately to Supabase.</p>
       </footer>
       <span className="sr-only" aria-live="assertive">{messages.filter((item) => item.role === "agent").at(-1)?.text}</span>
     </main>

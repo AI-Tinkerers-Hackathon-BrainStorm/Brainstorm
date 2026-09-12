@@ -16,10 +16,12 @@ Say: “Help me find my red bottle.” Pan slowly. SightLoop should guide left/r
 
 Say: “Read the sign in front of me.” Hold the phone steady. SightLoop captures one high-resolution frame, routes it to Qwen OCR, displays the transcript, and reads useful text aloud.
 
-## 1:55–2:25 — Memory
+## 1:55–2:35 — Placement memory and finding again
 
-Say: “Remember where I put my keys,” place the keys beside a laptop, then turn the camera away. Ask: “Where are my keys?” Expected wording: “I last saw what appeared to be your keys beside the laptop. I can’t confirm they’re still there.” Emphasize that history is not presented as current fact.
+With the notebook and bottle both clearly visible, place the bottle to the right of the notebook and release it. Agent View should show a `PUT_DOWN` memory containing appearance, capture time, `right of` relation, `notebook` anchor, full desk location, confidence, and evidence IDs. Turn the camera away.
 
-## 2:25–2:50 — resilience
+Ask: “Where did I put my bottle?” Expected wording recalls the notebook-relative position, says it cannot confirm the bottle is still there, and starts looking. After several checked views over at least five seconds, SightLoop may say it was moved or remains outside the view. When a matching bottle appears in two consecutive observations, the response begins “This may be your bottle.”
+
+## 2:35–3:00 — resilience
 
 Turn on Low bandwidth mode. Automatic frames stop while the preview stays live. Press Scan now to show the single-frame fallback. Close with the experimental-assistance notice.

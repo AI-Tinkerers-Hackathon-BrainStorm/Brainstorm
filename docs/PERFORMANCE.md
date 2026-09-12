@@ -8,6 +8,8 @@
 - OCR/manual scan: one high-resolution JPEG only when requested.
 - Specialist concurrency: one active frame plus one replaceable pending frame.
 - Working memory: 20 observations / 20 seconds.
+- Recent object memory: five-minute TTL, 500 merged identities, confidence threshold 0.45.
+- Supabase writes: duplicate identities coalesce in the browser and database; flush every five seconds, at 20 pending identities, or immediately for an episodic event. Both RPCs cap batches at 50, apply 5–60 second exponential retry backoff, and enforce 500 recent identities / 100 events per user.
 - Transcript: 30 entries; rendered view: 10 entries.
 - Timeline: 100 entries; drawer view: latest 12.
 - Background vision has a 12-second provider budget to cover measured API variance, while anything older than 7 seconds is excluded from current-view guidance and temporal reasoning. A late successful background result can update bounded `LAST_SEEN` memory only, using its original capture timestamp; results older than 15 seconds are dropped entirely. Detailed scans return a Flash result with a 13-second provider budget; a weak result can use one sequential Max attempt with a 32-second budget. A useful Flash result is spoken first and the same transient frame may then be refined by Max in the background. A new user turn or scan aborts refinement without waiting. OCR uses 13 seconds.
