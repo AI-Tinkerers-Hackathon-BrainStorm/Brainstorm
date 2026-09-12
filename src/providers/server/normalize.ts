@@ -64,7 +64,7 @@ export function normalizeObservation(
   } satisfies GoalAssessment : undefined;
 
   const receivedAt = Date.now();
-  const staleAfterMs = meta.purpose === "background" ? 5_000 : meta.purpose === "ocr" ? 15_000 : 20_000;
+  const staleAfterMs = meta.purpose === "background" ? 7_000 : meta.purpose === "ocr" ? 15_000 : 20_000;
   const stale = receivedAt - meta.capturedAt > staleAfterMs;
   return {
     id: `obs-${meta.frameId}`,

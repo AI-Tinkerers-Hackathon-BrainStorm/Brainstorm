@@ -6,7 +6,7 @@ The UI talks only to normalized TypeScript provider interfaces. Server route han
 
 Qwen Omni Realtime is the low-latency camera and microphone path. Background HTTPS observations use the lightweight vision model. An explicit detailed scene question captures one high-resolution still, returns a `deepVision` Flash result first, then runs `deepVisionMax` sequentially as a non-speaking refinement. Max results are stored only as bounded structured last-seen scenes; explicit reading alone uses OCR.
 
-The agent is one deterministic orchestrator around one primary model: goal → observe → decide → act → verify. Working visual memory is a bounded in-memory ring; only structured episodic events may persist locally. Every frame carries capture, send, and receive timestamps. A latest-frame-wins channel prevents an AI frame queue.
+The agent is one deterministic orchestrator around one primary model: goal → observe → decide → act → verify. Working visual memory is a bounded in-memory ring; structured last-seen events persist locally and can answer later where-is questions. Late background results never become current observations or guidance, but a bounded result can still update historical `LAST_SEEN` memory with its original capture time. A first spoken answer may come from the latest observation or memory while a specialist scan continues. Every frame carries capture, send, and receive timestamps. A latest-frame-wins channel prevents an AI frame queue. A user turn that never receives a model response expires so background decisions resume.
 
 ## Modules
 

@@ -7,8 +7,8 @@ SightLoop uses one proactive orchestrator. Specialist calls are tools, not peer 
 1. `set_goal` converts a spoken or typed command to a structured goal.
 2. `FrameSampler` observes at a mode- and quality-dependent rate.
 3. Qwen returns a normalized `VisionObservation` with timestamps, objects, optional real boxes, text, and a goal assessment.
-4. The tracker, bounded working memory, temporal reasoner, and salience policy update.
-5. The orchestrator decides whether to stay silent, guide, verify, remember, or announce.
+4. The tracker, bounded working memory, temporal reasoner, and salience policy update. Fresh objects above confidence are stored as structured `LAST_SEEN` events; three still frames without a previously seen object may add a conservative `INFERRED` absence, never a theft claim.
+5. The orchestrator can answer immediately from current vision plus memory. It then decides whether to stay silent, guide, verify, remember, or announce.
 6. Find mode requires two consecutive supporting observations unless fast mode is explicit.
 7. A later frame verifies or revises the belief.
 
@@ -29,4 +29,4 @@ Qwen3.5 Omni Realtime is connected over browser WebRTC when signaling succeeds. 
 - `INFERRED`: conservative multi-frame inference.
 - `UNKNOWN`: no adequate evidence.
 
-The system prompt lives in `src/agent/prompts.ts` and is shared by realtime and specialist routes.
+The realtime conversation, structured vision, OCR, and direct text fallback prompts have separate contracts in `src/agent/prompts.ts`.

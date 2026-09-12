@@ -6,6 +6,7 @@ export type TranscriptHandler = (event: { role: "user" | "agent"; text: string; 
 export interface SendTextOptions {
   context?: string;
   timing?: Pick<TurnLatencyTelemetry, "speechEndAt" | "transcriptAt">;
+  forceFallback?: boolean;
 }
 
 export interface RealtimeProvider {

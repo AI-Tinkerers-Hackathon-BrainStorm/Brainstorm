@@ -26,7 +26,9 @@ import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { AgentOrchestrator, type AgentSnapshot } from "@/src/agent/AgentOrchestrator.ts";
+import { hasUsefulObjectInventory, scanAddsNewObjects } from "@/src/agent/EvidenceReply.ts";
 import { parseUserIntent } from "@/src/agent/GoalParser.ts";
+import { ASR_WATCHDOG_MS, shouldFallbackUnansweredTurn } from "@/src/agent/TurnWatchdog.ts";
 import { AudioManager, shouldUseSpeechSynthesis, type TranscriptTiming } from "@/src/media/AudioManager.ts";
 import { CameraManager } from "@/src/media/CameraManager.ts";
 import { captureHighResolution, FrameSampler } from "@/src/media/FrameSampler.ts";
@@ -80,12 +82,12 @@ function latency(start?: number, end?: number) {
 
 function detailedObservationSpeech(observation: VisionObservation) {
   if (observation.freshness === "STALE") return "The detailed scan returned too late to describe the current view. Please scan again.";
-  const labels = [...new Set(observation.objects.filter((item) => item.confidence >= 0.45).map((item) => item.label))].slice(0, 16);
+  const labels = [...new Set(observation.objects.filter((item) => item.confidence >= 0.45).map((item) => item.color ? `${item.color} ${item.label}` : item.label))].slice(0, 16);
   return labels.length ? `${observation.sceneSummary} I identified: ${labels.join(", ")}.` : observation.sceneSummary;
 }
 
 function cachedDetailedSpeech(scene: CachedDetailedScene) {
-  const labels = [...new Set(scene.objects.filter((item) => item.confidence >= 0.45).map((item) => item.label))].slice(0, 12);
+  const labels = [...new Set(scene.objects.filter((item) => item.confidence >= 0.45).map((item) => item.color ? `${item.color} ${item.label}` : item.label))].slice(0, 12);
   const inventory = labels.length ? ` It included: ${labels.join(", ")}.` : "";
   return `I couldn’t refresh the camera analysis. In the last detailed scan at ${timeLabel(scene.capturedAt)}, I saw: ${scene.sceneSummary}${inventory} I can’t confirm those items are still visible.`;
 }
@@ -121,6 +123,7 @@ export function SightLoopApp() {
   const completedTurnRef = useRef<string | undefined>(undefined);
   const userTurnSequenceRef = useRef(0);
   const cameraSessionRef = useRef(0);
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const lowBandwidthRef = useRef(false);
   const [cameraState, setCameraState] = useState<CameraState>("ready");
@@ -169,19 +172,21 @@ export function SightLoopApp() {
   }, [addMessage]);
 
   const handleObservation = useCallback((observation: VisionObservation) => {
-    const staleAfterMs = observation.purpose === "background" ? 5_000 : observation.purpose === "ocr" ? 15_000 : 20_000;
+    const staleAfterMs = observation.purpose === "background" ? 7_000 : observation.purpose === "ocr" ? 15_000 : 20_000;
     const ageMs = Date.now() - observation.capturedAt;
     const evaluated = ageMs > staleAfterMs
       ? { ...observation, freshness: "STALE" as const, staleReason: observation.staleReason ?? `captured_${ageMs}ms_before_client_use` }
       : observation;
-    const next = orchestratorRef.current?.observe(evaluated);
+    const next = evaluated.freshness === "STALE" && evaluated.purpose === "background"
+      ? orchestratorRef.current?.recordHistoricalObservation(evaluated)
+      : orchestratorRef.current?.observe(evaluated);
     if (!next) return;
     setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory] });
     persistAgentSnapshot(next);
   }, [persistAgentSnapshot]);
 
   const createSampler = useCallback(() => {
-    if (!videoRef.current || lowBandwidthRef.current || samplerRef.current || refinementPromiseRef.current) return;
+    if (!videoRef.current || lowBandwidthRef.current || samplerRef.current) return;
     const sampler = new FrameSampler(videoRef.current, async (frame, encodeMs) => {
       const monitor = performanceMonitor;
       monitor.encoded(encodeMs);
@@ -242,6 +247,7 @@ export function SightLoopApp() {
       if (telemetry.turn?.responseDoneAt && completedTurnRef.current !== telemetry.turn.turnId) {
         completedTurnRef.current = telemetry.turn.turnId;
         orchestratorRef.current?.completeUserTurn();
+        samplerRef.current?.resume();
         const next = orchestratorRef.current?.snapshot();
         if (next) setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory] });
       }
@@ -260,6 +266,7 @@ export function SightLoopApp() {
       unsubscribeConnection();
       unsubscribeTelemetry();
       unsubscribeTool();
+      if (watchdogRef.current) clearTimeout(watchdogRef.current);
       samplerRef.current?.stop();
       scanAbortRef.current?.abort();
       refinementAbortRef.current?.abort();
@@ -275,6 +282,12 @@ export function SightLoopApp() {
     }
   }, []);
 
+  const finishUserTurn = useCallback((turnSequence: number) => {
+    if (turnSequence !== userTurnSequenceRef.current) return;
+    orchestratorRef.current?.completeUserTurn();
+    samplerRef.current?.resume();
+  }, []);
+
   const processCommand = useCallback(async (command: string, fromRealtime = false, timing?: TranscriptTiming) => {
     const text = command.trim();
     if (!text || !orchestratorRef.current) return;
@@ -283,25 +296,32 @@ export function SightLoopApp() {
     const agent = orchestratorRef.current;
     const intent = parseUserIntent(text);
     const turnSequence = ++userTurnSequenceRef.current;
-    const usesSpecialist = intent.kind === "EPHEMERAL_VISUAL_QA" || (intent.kind === "PERSISTENT_GOAL" && intent.goalType === "read");
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    const usesSpecialist = intent.kind === "EPHEMERAL_VISUAL_QA"
+      || (intent.kind === "PERSISTENT_GOAL" && ["find", "read", "remember"].includes(intent.goalType));
+    const answersFromMemory = intent.kind === "PERSISTENT_GOAL" && intent.goalType === "review";
     if (!usesSpecialist) {
       scanAbortRef.current?.abort("superseded_by_user_turn");
       refinementAbortRef.current?.abort("superseded_by_user_turn");
-      providerRef.current.setResponseSuppressed(false);
+      providerRef.current.setResponseSuppressed(answersFromMemory && fromRealtime);
     } else if (fromRealtime) {
       providerRef.current.setResponseSuppressed(true);
     }
     agent.beginUserTurn();
+    samplerRef.current?.pause();
 
     if (intent.kind === "EPHEMERAL_VISUAL_QA") {
+      const prior = agent.snapshot().observation;
+      const local = agent.answerFromEvidence(text);
+      if (local) speak(local);
       try {
         if (!cameraRef.current.active) {
-          speak("Start SightLoop first so I can inspect the current view.");
+          if (!local) speak("Start SightLoop first so I can inspect the current view.");
         } else {
           const observation = await scanNow(false, text, true);
           if (turnSequence === userTurnSequenceRef.current) {
-            if (observation) speak(detailedObservationSpeech(observation));
-            else {
+            if (observation && (!local || scanAddsNewObjects(prior, observation))) speak(detailedObservationSpeech(observation));
+            else if (!observation && !local) {
               const cached = agent.snapshot().detailedScenes.at(-1);
               speak(cached ? cachedDetailedSpeech(cached) : "I couldn’t complete a fresh scan of the current view. Keep the camera open, hold it steady, and try again.");
             }
@@ -310,10 +330,13 @@ export function SightLoopApp() {
       } finally {
         if (fromRealtime && turnSequence === userTurnSequenceRef.current) providerRef.current.setResponseSuppressed(false);
       }
-      if (turnSequence === userTurnSequenceRef.current) agent.completeUserTurn();
+      finishUserTurn(turnSequence);
     } else if (intent.kind === "PERSISTENT_GOAL") {
       const goal = agent.setGoal(text);
-      if (goal.type === "read") {
+      if (goal.type === "review") {
+        if (fromRealtime && turnSequence === userTurnSequenceRef.current) providerRef.current.setResponseSuppressed(false);
+        finishUserTurn(turnSequence);
+      } else if (goal.type === "read") {
         try {
           if (cameraRef.current.active) {
             const observation = await scanNow(true, text, true);
@@ -327,15 +350,53 @@ export function SightLoopApp() {
         } finally {
           if (fromRealtime && turnSequence === userTurnSequenceRef.current) providerRef.current.setResponseSuppressed(false);
         }
-        if (turnSequence === userTurnSequenceRef.current) agent.completeUserTurn();
+        finishUserTurn(turnSequence);
+      } else if (goal.type === "find" || goal.type === "remember") {
+        try {
+          if (!cameraRef.current.active) {
+            speak("Start SightLoop first so I can inspect that object.");
+          } else {
+            const observation = await scanNow(false, text, true);
+            if (turnSequence === userTurnSequenceRef.current) {
+              if (!observation) speak("I couldn’t complete a fresh object scan. Keep the camera steady and try again.");
+              else if (goal.type === "find" && !observation.goalAssessment?.shouldSpeak) speak(`I haven’t confidently identified ${goal.target} yet. Move the camera slowly while I keep looking.`);
+              else if (goal.type === "remember" && agent.snapshot().goal?.type === "remember") speak(`I couldn’t confidently identify ${goal.target}, so I haven’t saved an unreliable location.`);
+            }
+          }
+        } finally {
+          if (fromRealtime && turnSequence === userTurnSequenceRef.current) providerRef.current.setResponseSuppressed(false);
+        }
+        finishUserTurn(turnSequence);
       } else if (!fromRealtime) {
         try {
           await providerRef.current.sendText(text, { timing, context: agent.snapshot().observation?.sceneSummary });
         } catch {
           setError("Your request was not delivered to the realtime service. The visual goal remains active, and you can retry.");
           speak("I couldn’t send that request to the realtime service. The visual goal is still active.");
-          agent.completeUserTurn();
+          finishUserTurn(turnSequence);
         }
+      } else {
+        watchdogRef.current = setTimeout(async () => {
+          if (turnSequence !== userTurnSequenceRef.current) return;
+          const turn = providerRef.current.currentTelemetry.turn;
+          const elapsed = Date.now() - (timing?.transcriptAt ?? Date.now());
+          if (!shouldFallbackUnansweredTurn(turn, elapsed)) return;
+          const local = agent.answerFromEvidence(text);
+          if (local) speak(local);
+          else {
+            providerRef.current.setResponseSuppressed(true);
+            providerRef.current.cancelResponse();
+            try {
+              await providerRef.current.sendText(text, { timing, context: agent.snapshot().observation?.sceneSummary, forceFallback: true });
+            } catch {
+              setError("Your request was not delivered to the realtime service. The visual goal remains active, and you can retry.");
+              speak("I couldn’t send that request to the realtime service. The visual goal is still active.");
+            } finally {
+              providerRef.current.setResponseSuppressed(false);
+            }
+          }
+          finishUserTurn(turnSequence);
+        }, ASR_WATCHDOG_MS);
       }
     } else if (!fromRealtime) {
       try {
@@ -343,15 +404,37 @@ export function SightLoopApp() {
       } catch {
         setError("Your question was not delivered. Check the connection and try again.");
         speak("I couldn’t send that question. Please check the connection and try again.");
-        agent.completeUserTurn();
+        finishUserTurn(turnSequence);
       }
+    } else {
+      watchdogRef.current = setTimeout(async () => {
+        if (turnSequence !== userTurnSequenceRef.current) return;
+        const turn = providerRef.current.currentTelemetry.turn;
+        const elapsed = Date.now() - (timing?.transcriptAt ?? Date.now());
+        if (!shouldFallbackUnansweredTurn(turn, elapsed)) return;
+        const local = agent.answerFromEvidence(text);
+        if (local) speak(local);
+        else {
+          providerRef.current.setResponseSuppressed(true);
+          providerRef.current.cancelResponse();
+          try {
+            await providerRef.current.sendText(text, { timing, context: agent.snapshot().observation?.sceneSummary, forceFallback: true });
+          } catch {
+            setError("Your question was not delivered. Check the connection and try again.");
+            speak("I couldn’t send that question. Please check the connection and try again.");
+          } finally {
+            providerRef.current.setResponseSuppressed(false);
+          }
+        }
+        finishUserTurn(turnSequence);
+      }, ASR_WATCHDOG_MS);
     }
 
     const next = agent.snapshot();
     setSnapshot({ ...next, timeline: [...next.timeline], memory: [...next.memory] });
   // scanNow is intentionally resolved at interaction time.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addMessage, speak]);
+  }, [addMessage, finishUserTurn, speak]);
 
   useEffect(() => providerRef.current.onTranscript((event) => {
     if (event.role === "agent") {
@@ -437,9 +520,8 @@ export function SightLoopApp() {
       await previous;
     }
     if (refinementPromiseRef.current) {
-      const previousRefinement = refinementPromiseRef.current;
       refinementAbortRef.current?.abort("superseded_by_new_scan");
-      await previousRefinement;
+      refinementPromiseRef.current = null;
     }
     if (!videoRef.current || !cameraRef.current.active) return undefined;
     const resumeAutomatic = Boolean(samplerRef.current && !lowBandwidthRef.current);
@@ -461,6 +543,7 @@ export function SightLoopApp() {
         const goal = requestedGoal ?? (current ? goalLabel(current) : undefined);
         let observation: VisionObservation;
         let usedMaxFallback = false;
+        let maxAttempted = false;
         if (useOcr) {
           observation = await ocrRef.current.read(frame, controller.signal);
         } else {
@@ -470,6 +553,16 @@ export function SightLoopApp() {
           );
           observation = result.value;
           usedMaxFallback = result.usedMaxFallback;
+          maxAttempted = usedMaxFallback;
+          if (!usedMaxFallback && !hasUsefulObjectInventory(observation, current?.goal?.target, current?.goal?.attributes.color)) {
+            maxAttempted = true;
+            try {
+              observation = await deepVisionRef.current.analyzeMax(frame, goal, controller.signal);
+              usedMaxFallback = true;
+            } catch (cause) {
+              orchestratorRef.current?.tools.log("error", "Max scan could not improve a weak result", cause instanceof Error ? cause.message.slice(0, 120) : "unknown_error");
+            }
+          }
           if (usedMaxFallback) {
             orchestratorRef.current?.tools.log("system", "Fast scan fallback used", "Max completed the scan");
             cacheMaxObservation(observation);
@@ -477,7 +570,7 @@ export function SightLoopApp() {
         }
         performanceMonitor.requestFinished(Date.now() - startedAt);
         handleObservation(observation);
-        if (!useOcr && !usedMaxFallback) startMaxRefinement(frame, goal, resumeAutomatic, userTurnSequenceRef.current);
+        if (!useOcr && !usedMaxFallback && !maxAttempted) startMaxRefinement(frame, goal, resumeAutomatic, userTurnSequenceRef.current);
         return observation;
       } catch (cause) {
         const aborted = controller.signal.aborted || (cause as Error).name === "AbortError";
@@ -489,7 +582,7 @@ export function SightLoopApp() {
       } finally {
         setScanning(false);
         setPerformance(performanceMonitor.snapshot());
-        if (resumeAutomatic && !lowBandwidthRef.current && !refinementPromiseRef.current) createSampler();
+        if (resumeAutomatic && !lowBandwidthRef.current) createSampler();
       }
     })();
     scanPromiseRef.current = task;

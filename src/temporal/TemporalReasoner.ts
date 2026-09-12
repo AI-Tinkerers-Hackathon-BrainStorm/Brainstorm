@@ -1,3 +1,4 @@
+import { isTransientBodyPart } from "../agent/ObjectIdentity.ts";
 import type { DetectedObject, TemporalEvent, VisionObservation } from "../types/index.ts";
 
 function area(object?: DetectedObject) {
@@ -14,6 +15,10 @@ function center(object?: DetectedObject) {
   return object.center ?? (object.bbox ? { x: (object.bbox.x1 + object.bbox.x2) / 2, y: (object.bbox.y1 + object.bbox.y2) / 2 } : undefined);
 }
 
+function stillFresh(observation: VisionObservation) {
+  return observation.freshness === "FRESH" && observation.cameraMotion === "low";
+}
+
 export class TemporalReasoner {
   analyze(history: readonly VisionObservation[]): TemporalEvent[] {
     if (history.length < 2) return [];
@@ -26,7 +31,7 @@ export class TemporalReasoner {
       if (!now) {
         events.push({
           type: "NOT_IN_CURRENT_VIEW",
-          subject: object.label,
+          subject: object.color ? `${object.color} ${object.label}` : object.label,
           confidence: current.cameraMotion === "high" ? 0.9 : 0.65,
           evidenceFrameIds: [previous.frameId, current.frameId],
           description: current.cameraMotion === "high" ? "Camera moved; removal is not established." : "Object is not visible; occlusion or removal remains uncertain.",
@@ -56,6 +61,32 @@ export class TemporalReasoner {
         }
       }
     }
+
+    if (history.length >= 4) {
+      const lastThree = history.slice(-3);
+      const earlier = history.slice(0, -3);
+      if (lastThree.every(stillFresh)) {
+        const seen = new Set<string>();
+        for (const [observationIndex, observation] of earlier.entries()) {
+          if (history.slice(observationIndex + 1).some((item) => !stillFresh(item))) continue;
+          for (const object of observation.objects) {
+            if (object.confidence < 0.65 || isTransientBodyPart(object.label)) continue;
+            const key = `${(object.color ?? "").toLowerCase()}|${object.label.toLowerCase()}`;
+            if (seen.has(key)) continue;
+            if (lastThree.some((item) => item.objects.some((candidate) => sameObject(object, candidate)))) continue;
+            seen.add(key);
+            events.push({
+              type: "DISAPPEARED",
+              subject: object.color ? `${object.color} ${object.label}` : object.label,
+              confidence: 0.6,
+              evidenceFrameIds: [observation.frameId, ...lastThree.map((item) => item.frameId)],
+              description: "Not in the current view after several still frames; it may have been moved, covered, or picked up. Removal is not confirmed.",
+            });
+          }
+        }
+      }
+    }
+
     return events;
   }
 }

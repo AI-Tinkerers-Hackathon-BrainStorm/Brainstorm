@@ -97,7 +97,7 @@ export interface CachedDetailedScene {
   receivedAt: number;
   model: string;
   sceneSummary: string;
-  objects: Array<{ label: string; color?: string; confidence: number; spatialRelation?: string[] }>;
+  objects: Array<{ label: string; aliases?: string[]; color?: string; attributes?: string[]; confidence: number; spatialRelation?: string[] }>;
   text: string[];
   epistemic: "LAST_SEEN";
 }

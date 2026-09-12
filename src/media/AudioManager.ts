@@ -70,6 +70,7 @@ export class AudioManager {
   private readonly deduper = new TranscriptDeduper();
   private audioContext?: AudioContext;
   private remoteAudio?: HTMLAudioElement;
+  private unlockUtterance?: SpeechSynthesisUtterance;
 
   get supported() {
     if (typeof window === "undefined") return false;
@@ -125,7 +126,14 @@ export class AudioManager {
 
       if ("speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined") {
         window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(new SpeechSynthesisUtterance(testText));
+        const utterance = new SpeechSynthesisUtterance(testText);
+        utterance.lang = /[\u3400-\u9fff]/u.test(testText) ? "zh-CN" : (navigator.language || "en-US");
+        utterance.volume = 1;
+        utterance.onend = () => { this.unlockUtterance = undefined; };
+        utterance.onerror = () => { this.unlockUtterance = undefined; };
+        this.unlockUtterance = utterance;
+        window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utterance);
         speechSynthesisReady = true;
       }
     } catch (error) {
@@ -192,6 +200,7 @@ export class AudioManager {
     this.remoteAudio?.pause();
     this.remoteAudio?.remove();
     this.remoteAudio = undefined;
+    this.unlockUtterance = undefined;
     await this.audioContext?.close().catch(() => undefined);
     this.audioContext = undefined;
   }

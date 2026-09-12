@@ -18,7 +18,9 @@ export class DetailedSceneMemory {
       sceneSummary: observation.sceneSummary,
       objects: observation.objects.slice(0, 30).map((object) => ({
         label: object.label,
+        aliases: object.aliases,
         color: object.color,
+        attributes: object.attributes,
         confidence: object.confidence,
         spatialRelation: object.spatialRelation,
       })),
