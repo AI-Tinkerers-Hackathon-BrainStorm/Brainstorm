@@ -1,22 +1,22 @@
-# SightLoop
+# SightJarvis
 
 **A mobile-first visual assistance agent for blind and low-vision users.**
 
-SightLoop combines camera sampling, voice interaction, structured scene understanding, and on-device memory to help users understand their surroundings, find objects, read text, and recall where objects were last observed.
+SightJarvis combines camera sampling, voice interaction, structured scene understanding, and on-device memory to help users understand their surroundings, find objects, read text, and recall where objects were last observed.
 
 The application follows a continuous observation and verification loop:
 
 **User goal → sampled observation → structured understanding → decision → voice or haptic feedback → later observation → verification**
 
-SightLoop is an experimental prototype intended for controlled demonstrations and evaluation. It is not a certified navigation, collision-avoidance, or medical assistance device.
+SightJarvis is an experimental prototype intended for controlled demonstrations and evaluation. It is not a certified navigation, collision-avoidance, or medical assistance device.
 
 > **Safety notice**
 >
-> Do not rely on SightLoop to determine whether a street crossing, route, or other safety-critical action is safe. Recognition can be incomplete, incorrect, or delayed. SightLoop does not replace a cane, guide dog, orientation and mobility training, or the user’s judgment.
+> Do not rely on SightJarvis to determine whether a street crossing, route, or other safety-critical action is safe. Recognition can be incomplete, incorrect, or delayed. SightJarvis does not replace a cane, guide dog, orientation and mobility training, or the user’s judgment.
 
 ## 1. Project Scope and Current Status
 
-SightLoop goes beyond single-image question answering by maintaining user goals and structured evidence across observations.
+SightJarvis goes beyond single-image question answering by maintaining user goals and structured evidence across observations.
 
 The current implementation includes:
 
@@ -38,6 +38,8 @@ The current version does **not** guarantee:
 - A fixed end-to-end response time.
 
 This document describes the Timeline question-answering fix included in commit `35daa71`. If the default branch does not yet contain that fix, use `feat/timely-reasoning-and-memory`.
+
+**Naming note:** SightJarvis is the current project name. Existing source filenames, package identifiers, browser storage keys, and some interface or spoken strings may still use the previous name, SightLoop. This documentation update does not change those implementation details. The repository remains `AI-Tinkerers-Hackathon-BrainStorm/Brainstorm`.
 
 ## 2. Interaction Modes
 
@@ -113,7 +115,7 @@ An object’s absence does not prove that someone picked it up, and it must not 
 
 ## 3. Architecture and Data Flow
 
-SightLoop uses a deterministic Agent Orchestrator to manage state, memory, and actions around normalized visual data. It does not depend on a complex multi-agent architecture.
+SightJarvis uses a deterministic Agent Orchestrator to manage state, memory, and actions around normalized visual data. It does not depend on a complex multi-agent architecture.
 
 ### Browser Responsibilities
 
@@ -445,7 +447,7 @@ If Vercel Deployment Protection is enabled, accessing a Preview or its API may r
 
 This is deployment access control, not necessarily a Qwen service failure.
 
-Vercel access protection and SightLoop’s internal demonstration login are separate mechanisms.
+Vercel access protection and SightJarvis’s internal demonstration login are separate mechanisms.
 
 ### Security Requirements Before Public Production Use
 
@@ -468,13 +470,10 @@ For first use:
 1. Open the application. If the demonstration login screen appears, choose the appropriate demo or guest option.
 2. Press the start control.
 3. Allow camera and microphone access.
-4. Press `Test Sound` and confirm that the device audibly says:
-
-```text
-SightLoop audio enabled.
-```
-
+4. Press `Test Sound` and confirm that the device audibly plays the audio-enabled confirmation.
 5. Wait for a valid observation to appear in the Timeline before asking a scene question.
+
+The implementation described here still uses the legacy spoken confirmation, `SightLoop audio enabled.` This is an existing application string, not the current project name.
 
 During a genuine user interaction, audio unlocking attempts to:
 
@@ -571,7 +570,7 @@ npm test
 npm run build
 ```
 
-For the Timeline fix described in this document, all four checks passed locally, with **41 automated tests**.
+For the Timeline fix described in this document, all four checks passed locally, with **41 automated tests**. This is the recorded validation of that code version, not a claim that a fresh test run was performed for this documentation-only rename.
 
 Coverage includes:
 
