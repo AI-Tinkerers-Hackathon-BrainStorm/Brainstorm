@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   // domain, Next rejects its own internal requests (including the HMR
   // websocket) unless that origin is listed here. Ignored in production.
   allowedDevOrigins: ["*.trycloudflare.com", "*.ngrok-free.dev"],
+  outputFileTracingIncludes: {
+    "/api/transcribe": ["./.whisper/whisper-cli", "./.whisper/ggml-base-q5_1.bin"],
+  },
 };
 
 export default nextConfig;

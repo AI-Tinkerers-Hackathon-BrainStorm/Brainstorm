@@ -6,6 +6,7 @@
 - AI input: up to 960×540 JPEG around quality 0.72, normally about 1 FPS and never above 2 FPS. This keeps enough color and edge detail for cups, cards, keys, medicine bottles, and similar small objects without sending high-resolution video continuously.
 - Realtime WebRTC video: a separate canvas stream capped at 1 FPS; the preview stream is not forwarded at display FPS. RTP media is gated until the realtime session acknowledges its configuration.
 - OCR/manual scan: one high-resolution JPEG only when requested.
+- Local ASR: latest-wins 3-second microphone clips are downsampled to 16 kHz PCM and sent only to the same-origin Vercel function. The quantized multilingual `whisper.cpp` base runtime runs on CPU; raw clips are deleted from `/tmp` after each request.
 - Specialist concurrency: one active frame plus one replaceable pending frame.
 - Working memory: 20 observations / 20 seconds.
 - Recent object memory: five-minute TTL, 500 merged identities, confidence threshold 0.45.

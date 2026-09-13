@@ -17,7 +17,7 @@ import { SupabaseMemoryStore, type SupabaseMemoryDependencies } from "../memory/
 import { WorkingMemory } from "../memory/WorkingMemory.ts";
 import { DetailedSceneMemory } from "../memory/DetailedSceneMemory.ts";
 import { LatestFrameProcessor } from "../media/LatestFrameProcessor.ts";
-import { newFinalTranscripts, shouldUseSpeechSynthesis, TranscriptDeduper } from "../media/AudioManager.ts";
+import { hasAudibleSpeech, newFinalTranscripts, pcmToWav, shouldUseSpeechSynthesis, TranscriptDeduper } from "../media/AudioManager.ts";
 import { hasLiveVideoTrack, isVideoFrameReady, waitForCapturableFrame, waitForFreshVideoFrame, waitForVideoFrame } from "../media/CameraManager.ts";
 import { AdaptiveQualityController } from "../performance/AdaptiveQualityController.ts";
 import { EntityTracker } from "../temporal/EntityTracker.ts";
@@ -667,7 +667,7 @@ test("sendText on a closed DataChannel uses fallback or returns an explicit erro
   assert.match(provider.currentTelemetry.lastError ?? "", /text_fallback_503/);
 });
 
-test("continuous SpeechRecognition processes only results at resultIndex and dedupes rapid repeats", () => {
+test("Whisper audio helpers retain only final transcript compatibility and produce 16 kHz PCM WAV", async () => {
   const event = {
     resultIndex: 1,
     results: {
@@ -680,6 +680,22 @@ test("continuous SpeechRecognition processes only results at resultIndex and ded
   const dedupe = new TranscriptDeduper(2_500);
   assert.equal(dedupe.accept("我前面有什么", 1_000), true);
   assert.equal(dedupe.accept(" 我前面有什么？ ", 2_000), false);
+  assert.equal(hasAudibleSpeech(new Float32Array([0, 0.001, -0.001])), false);
+  assert.equal(hasAudibleSpeech(new Float32Array([0.08, -0.06, 0.05])), true);
+  const wav = pcmToWav(new Float32Array([0, 0.5, -0.5, 0]), 48_000);
+  const bytes = new Uint8Array(await wav.arrayBuffer());
+  assert.equal(wav.type, "audio/wav");
+  assert.deepEqual([...bytes.slice(0, 4)], [0x52, 0x49, 0x46, 0x46]);
+  assert.deepEqual([...bytes.slice(8, 12)], [0x57, 0x41, 0x56, 0x45]);
+  assert.equal(new DataView(bytes.buffer).getUint32(24, true), 16_000);
+});
+
+test("realtime session leaves ASR to the same-origin Whisper route", () => {
+  const source = readFileSync(new URL("../providers/QwenRealtimeProvider.ts", import.meta.url), "utf8");
+  const audio = readFileSync(new URL("../media/AudioManager.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /qwen3-asr|input_audio_transcription/);
+  assert.match(audio, /fetch\("\/api\/transcribe"/);
+  assert.doesNotMatch(audio, /WHISPER_BASE_URL|SpeechRecognition\?\?/);
 });
 
 test("proactive approaching remains debug-only and cannot抢占 a user turn", () => {

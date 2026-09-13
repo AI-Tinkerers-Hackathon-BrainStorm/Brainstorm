@@ -559,7 +559,7 @@ export function SightLoopApp() {
 
   const startListening = useCallback(() => {
     if (!audioRef.current.supported) {
-      setError("Continuous speech recognition is not available in this browser. You can still type a request.");
+      setError("Local Whisper capture is not available in this browser. You can still type a request.");
       return;
     }
     audioRef.current.start((text, timing) => { void processCommand(text, false, timing); }, (message) => {
@@ -570,12 +570,8 @@ export function SightLoopApp() {
 
   useEffect(() => {
     if (cameraState !== "live") return;
-    if (connection === "WEBRTC_CONNECTED") {
-      audioRef.current.stop();
-    } else if (connection === "FALLBACK" || connection === "DEGRADED") {
-      startListening();
-    }
-  }, [cameraState, connection, startListening]);
+    startListening();
+  }, [cameraState, startListening]);
 
   async function startCamera() {
     if (!videoRef.current) return;
@@ -592,6 +588,7 @@ export function SightLoopApp() {
         setError("Camera started, but sound could not be confirmed. Tap Test Sound, check Silent Mode, and confirm the iPhone audio route.");
       }
       setCameraState("live");
+      audioRef.current.attachInputStream(media);
       providerRef.current.attachMedia(media, videoRef.current);
       orchestratorRef.current?.setVisionActive(true);
       const videoTrack = media.getVideoTracks()[0];
@@ -606,9 +603,8 @@ export function SightLoopApp() {
       }, { once: true });
       await providerRef.current.connect();
       createSampler();
-      addMessage("system", "Camera and microphone are ready. Raw video is not stored.");
-      if (providerRef.current.currentTelemetry.transport === "WEBRTC_CONNECTED") setListening(true);
-      else startListening();
+      addMessage("system", "Camera and local Whisper microphone transcription are ready. Raw video and audio are not stored.");
+      startListening();
     } catch (cause) {
       setCameraState("error");
       orchestratorRef.current?.setVisionActive(false);
