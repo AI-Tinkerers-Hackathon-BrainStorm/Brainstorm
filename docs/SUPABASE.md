@@ -6,11 +6,12 @@ SightLoop uses Supabase only for structured visual memory. Camera frames, video,
 
 The configured development project ref is `taybmqmikfmigtdbninq`.
 
-1. In Supabase Dashboard, enable **Authentication → Providers → Anonymous Sign-Ins**. The demo UI creates an anonymous Supabase user so every browser session receives a real `auth.uid()` for row-level security. For any public deployment, also enable CAPTCHA and tighten Auth rate limits.
+1. In Supabase Dashboard, enable **Authentication → Providers → Anonymous Sign-Ins**. The demo UI creates an anonymous Supabase user so every browser session receives a real `auth.uid()` for row-level security.
 2. Apply `supabase/migrations/202609120002_visual_memory_hardening.sql` with the Supabase MCP `apply_migration` tool or the Supabase SQL editor. Its later version also safely upgrades the permissions and RPCs if an early prototype migration was already applied.
-3. Enable the Supabase **Cron** integration, then apply `supabase/migrations/202609120003_visual_memory_retention_cron.sql`. Keep this separate from the core migration so a branch without `pg_cron` cannot roll back the tables and RPCs.
-4. Copy the project URL and publishable key from **Project Settings → API**. A legacy anon key also works, but the publishable key is preferred.
-5. Set these variables locally and in Vercel Production, Preview, and Development environments:
+3. Apply `supabase/migrations/202609120004_visual_memory_owner_binding.sql`. This binds every read/write RPC to the browser-pinned Auth UID and revokes the older unbound signatures.
+4. Enable the Supabase **Cron** integration, then apply `supabase/migrations/202609120003_visual_memory_retention_cron.sql`. Keep this separate from the core migration so a branch without `pg_cron` cannot roll back the tables and RPCs.
+5. Copy the project URL and publishable key from **Project Settings → API**. A legacy anon key also works, but the publishable key is preferred.
+6. Set these variables locally and in Vercel Production, Preview, and Development environments:
 
 ```text
 NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
@@ -20,6 +21,8 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
 These two values are designed for browser use. Do not add a service-role or secret key to any `NEXT_PUBLIC_` variable.
 
 The Codex MCP OAuth connection is a development/admin connection used to apply and inspect migrations. It is not shipped to the app and is not the identity used by end users.
+
+This demo does not yet render a CAPTCHA challenge or pass a `captchaToken` to anonymous sign-in. Do not enable Supabase CAPTCHA without adding that UI flow, because new cloud-memory sessions would fail. Keep a public hackathon deployment behind Vercel Deployment Protection and tighten Supabase anonymous Auth rate limits. Before removing deployment protection, integrate Turnstile/hCaptcha end to end, then enable Supabase CAPTCHA and add a trusted admin cleanup for abandoned anonymous users.
 
 ## What is stored
 
@@ -31,7 +34,7 @@ The browser merges observations immediately for responsive recall. Cloud writes 
 
 ## Security model
 
-Both tables have RLS enabled. The `authenticated` role has owner-scoped `SELECT` only; it has no direct table mutation permission. Anonymous Supabase users still use the authenticated Postgres role and receive a unique UUID. Both write RPCs derive their owner from `auth.uid()`, strictly validate and bound their JSON input, and enforce the 500/100 per-owner caps in the same transaction.
+Both tables have RLS enabled. The `authenticated` role has owner-scoped `SELECT` only; it has no direct table mutation permission. Anonymous Supabase users still use the authenticated Postgres role and receive a unique UUID. Every RPC verifies that `auth.uid()` still matches the browser-pinned `expected_owner`; both write RPCs then derive their owner from `auth.uid()`, strictly validate and bound their JSON input, and enforce the 500/100 per-owner caps in the same transaction.
 
 The migration enables an hourly `pg_cron` job that globally deletes expired recent objects and events older than 30 days. Supabase does not automatically delete abandoned anonymous Auth users; periodically remove old anonymous users in a trusted admin job if account-table growth matters.
 

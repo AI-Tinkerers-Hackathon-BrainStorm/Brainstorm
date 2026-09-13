@@ -64,10 +64,12 @@ export function AuthContextProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    const pending = providerRef.current.signOut();
+    setUser(undefined);
+    setStatus("loading");
     try {
-      await providerRef.current.signOut();
+      await pending;
     } finally {
-      setUser(undefined);
       setStatus("unauthenticated");
     }
   }, []);

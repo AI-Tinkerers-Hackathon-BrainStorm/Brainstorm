@@ -82,16 +82,16 @@ export class DemoAuthProvider implements AuthProvider {
   }
 
   async signOut(): Promise<void> {
-    try {
-      await signOutSupabaseMemorySession();
-    } finally {
-      persist(null);
-    }
+    persist(null);
+    await signOutSupabaseMemorySession();
   }
 
   async restore(): Promise<Session | null> {
     const session = readPersistedSession();
-    if (!session) return null;
+    if (!session) {
+      await signOutSupabaseMemorySession();
+      return null;
+    }
     await prepareCloudMemory();
     return session;
   }

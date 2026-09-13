@@ -132,6 +132,7 @@ export function SightLoopApp() {
   const samplerRef = useRef<FrameSampler | null>(null);
   const orchestratorRef = useRef<AgentOrchestrator | null>(null);
   const memoryStoreRef = useRef<SupabaseMemoryStore | null>(null);
+  const signingOutRef = useRef(false);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPromiseRef = useRef<Promise<VisionObservation | undefined> | null>(null);
   const refinementAbortRef = useRef<AbortController | null>(null);
@@ -165,6 +166,7 @@ export function SightLoopApp() {
   }, []);
 
   const persistAgentSnapshot = useCallback((value: AgentSnapshot) => {
+    if (signingOutRef.current) return;
     try {
       localStorage.setItem(memoryKey, JSON.stringify(value.memory));
       localStorage.setItem(`${memoryKey}:recent-objects`, JSON.stringify(value.recentObjects));
@@ -174,6 +176,7 @@ export function SightLoopApp() {
   }, [memoryKey]);
 
   const handleSignOut = useCallback(async () => {
+    signingOutRef.current = true;
     const memoryStore = memoryStoreRef.current;
     if (memoryStore) {
       await Promise.race([
@@ -184,12 +187,26 @@ export function SightLoopApp() {
       if (memoryStoreRef.current === memoryStore) memoryStoreRef.current = null;
     }
     try {
-      await signOut();
+      localStorage.removeItem(memoryKey);
+      localStorage.removeItem(`${memoryKey}:recent-objects`);
+      localStorage.removeItem(`${memoryKey}:detailed-scenes`);
+    } catch { /* Signing out still clears the visible and cloud sessions. */ }
+    try {
+      await Promise.race([
+        signOut(),
+        new Promise<void>((resolve) => setTimeout(resolve, SIGN_OUT_FLUSH_TIMEOUT_MS)),
+      ]);
     } catch {
       // Supabase Auth removes the browser session even when its remote revoke
       // request fails; AuthContext also clears the visible demo session.
+    } finally {
+      try {
+        localStorage.removeItem(memoryKey);
+        localStorage.removeItem(`${memoryKey}:recent-objects`);
+        localStorage.removeItem(`${memoryKey}:detailed-scenes`);
+      } catch { /* The session still ends if storage is unavailable. */ }
     }
-  }, [signOut]);
+  }, [memoryKey, signOut]);
 
   // Keep the newest message in view; older ones stay reachable by scrolling up.
   useEffect(() => {

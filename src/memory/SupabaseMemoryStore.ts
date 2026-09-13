@@ -180,6 +180,7 @@ export class SupabaseMemoryStore {
   ) {}
 
   async load(): Promise<HydratedMemory> {
+    if (this.stopped) throw new Error("Supabase memory store is stopped.");
     if (!this.dependencies.isConfigured()) {
       this.onStatus("local-only");
       return { events: [], recentObjects: [], status: "local-only" };
@@ -191,16 +192,23 @@ export class SupabaseMemoryStore {
       this.onStatus("local-only");
       return { events: [], recentObjects: [], status: "local-only" };
     }
+    const expectedOwner = session.user.id;
     const [eventsResult, recentResult] = await Promise.all([
       client.from("episodic_memory_events")
         .select("client_event_id,event_type,subject_label,location_text,relation,anchor_label,appearance,attributes,confidence,evidence_frame_ids,evidence_observation_ids,captured_at,last_confirmed_at,epistemic_state")
-        .eq("owner_id", this.ownerId)
+        .eq("owner_id", expectedOwner)
         .order("captured_at", { ascending: false })
         .limit(100),
-      client.rpc("read_recent_object_memories"),
+      client.rpc("read_recent_object_memories", { expected_owner: expectedOwner }),
     ]);
+    if (this.stopped) throw new Error("Supabase memory store stopped while loading.");
     if (eventsResult.error) throw eventsResult.error;
     if (recentResult.error) throw recentResult.error;
+    const verifiedSession = await this.dependencies.getSession();
+    if (!verifiedSession || verifiedSession.user.id !== expectedOwner) {
+      this.stop();
+      throw new Error("The Supabase memory owner changed while cloud memory was loading.");
+    }
 
     const events = (eventsResult.data ?? []).map((row) => eventFromRow(row)).reverse();
     const recentObjects = (recentResult.data ?? []).map((row: Record<string, unknown>) => recentFromRow(row));
@@ -251,9 +259,11 @@ export class SupabaseMemoryStore {
         this.retryNotBefore = 0;
       })
       .catch(() => {
-        this.onStatus("error");
-        this.retryNotBefore = Date.now() + this.retryDelayMs;
-        this.retryDelayMs = Math.min(this.retryDelayMs * 2, MAX_RETRY_DELAY_MS);
+        if (!this.stopped) {
+          this.onStatus("error");
+          this.retryNotBefore = Date.now() + this.retryDelayMs;
+          this.retryDelayMs = Math.min(this.retryDelayMs * 2, MAX_RETRY_DELAY_MS);
+        }
       })
       .finally(() => { this.flushPromise = undefined; });
     await this.flushPromise;
@@ -278,11 +288,13 @@ export class SupabaseMemoryStore {
   }
 
   private async flushPending(): Promise<void> {
+    if (this.stopped) return;
     if (!this.pendingEvents.size && !this.pendingRecent.size) return;
     const client = this.dependencies.getClient();
     const session = this.ownerId
       ? await this.dependencies.getSession()
       : await this.pinInitialOwner();
+    if (this.stopped) throw new Error("Supabase memory store stopped before writing.");
     if (!this.ownerId) {
       throw new Error("Supabase memory has not pinned an authenticated owner yet.");
     }
@@ -296,13 +308,21 @@ export class SupabaseMemoryStore {
     this.pendingRecent.clear();
     try {
       for (let offset = 0; offset < events.length; offset += MAX_EVENT_BATCH) {
+        if (this.stopped) throw new Error("Supabase memory store stopped before writing events.");
         const batch = events.slice(offset, offset + MAX_EVENT_BATCH).map((item) => eventToRpc(item.value));
-        const result = await client.rpc("upsert_episodic_memory_events", { events: batch });
+        const result = await client.rpc("upsert_episodic_memory_events", {
+          expected_owner: this.ownerId,
+          events: batch,
+        });
         if (result.error) throw result.error;
       }
       for (let offset = 0; offset < recent.length; offset += MAX_RECENT_BATCH) {
+        if (this.stopped) throw new Error("Supabase memory store stopped before writing objects.");
         const batch = recent.slice(offset, offset + MAX_RECENT_BATCH).map((item) => recentToRpc(item.value));
-        const result = await client.rpc("merge_recent_object_sightings", { sightings: batch });
+        const result = await client.rpc("merge_recent_object_sightings", {
+          expected_owner: this.ownerId,
+          sightings: batch,
+        });
         if (result.error) throw result.error;
       }
       for (const item of events) this.syncedEventSignatures.set(item.value.id, item.signature);
@@ -317,10 +337,12 @@ export class SupabaseMemoryStore {
   }
 
   private async pinInitialOwner(): Promise<Session | undefined> {
+    if (this.stopped) return undefined;
     if (this.ownerId) return this.dependencies.getSession();
     if (!this.ownerPromise) {
       const pending = this.dependencies.ensureSession()
         .then((session) => {
+          if (this.stopped) return undefined;
           if (session) this.ownerId = session.user.id;
           return session;
         })

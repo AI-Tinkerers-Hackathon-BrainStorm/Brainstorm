@@ -67,8 +67,9 @@ function fakeSupabaseClient(calls: string[]): SupabaseClient {
       };
       return query;
     },
-    async rpc(name: string) {
+    async rpc(name: string, parameters?: Record<string, unknown>) {
       calls.push(`rpc:${name}`);
+      if (parameters?.expected_owner) calls.push(`owner:${String(parameters.expected_owner)}`);
       return { data: name === "read_recent_object_memories" ? [] : 1, error: null };
     },
   } as unknown as SupabaseClient;
@@ -206,6 +207,7 @@ test("SupabaseMemoryStore queues before hydration and pins all writes to one aut
   await loading;
   await store.flush();
   assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 1);
+  assert.ok(calls.includes("owner:owner-a"));
   assert.equal(ensureCalls, 1);
 
   activeSession = supabaseSession("owner-b");
@@ -246,6 +248,34 @@ test("SupabaseMemoryStore retries initial session setup when a new snapshot arri
   assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 1);
 });
 
+test("SupabaseMemoryStore never writes after stop when initial auth resolves late", async () => {
+  const calls: string[] = [];
+  const client = fakeSupabaseClient(calls);
+  let releaseSession!: (session: Session) => void;
+  const delayedSession = new Promise<Session>((resolve) => { releaseSession = resolve; });
+  const dependencies: SupabaseMemoryDependencies = {
+    isConfigured: () => true,
+    getClient: () => client,
+    ensureSession: async () => delayedSession,
+    getSession: async () => supabaseSession("late-owner"),
+  };
+  const store = new SupabaseMemoryStore(() => undefined, dependencies);
+  store.queueSnapshot({
+    memory: [{
+      id: "late-placement", timestamp: Date.now(), subject: "bottle", action: "PUT_DOWN",
+      location: "to the right of notebook", relation: "right of", anchor: "notebook",
+      appearance: "matte red bottle", confidence: 0.9,
+      evidence: { frameIds: ["late-frame"], observationIds: ["late-observation"] }, epistemic: "LAST_SEEN",
+    }],
+    recentObjects: [],
+  });
+  await Promise.resolve();
+  store.stop();
+  releaseSession(supabaseSession("late-owner"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 0);
+});
+
 test("Supabase migration exposes reads only and serializes bounded RPC writes", () => {
   const migration = readFileSync(
     new URL("../../supabase/migrations/202609120002_visual_memory_hardening.sql", import.meta.url),
@@ -255,6 +285,10 @@ test("Supabase migration exposes reads only and serializes bounded RPC writes", 
     new URL("../../supabase/migrations/202609120003_visual_memory_retention_cron.sql", import.meta.url),
     "utf8",
   );
+  const ownerBinding = readFileSync(
+    new URL("../../supabase/migrations/202609120004_visual_memory_owner_binding.sql", import.meta.url),
+    "utf8",
+  );
   assert.match(migration, /revoke all on table public\.recent_object_memories from anon, authenticated/i);
   assert.match(migration, /grant select on table public\.episodic_memory_events to authenticated/i);
   assert.equal(migration.match(/pg_advisory_xact_lock/g)?.length, 2);
@@ -262,6 +296,8 @@ test("Supabase migration exposes reads only and serializes bounded RPC writes", 
   assert.match(migration, /offset 100/i);
   assert.match(migration, /expires_at > statement_timestamp\(\)/i);
   assert.match(cron, /cron\.schedule/i);
+  assert.equal(ownerBinding.match(/auth\.uid\(\) is distinct from expected_owner/gi)?.length, 3);
+  assert.match(ownerBinding, /revoke all on function public\.merge_recent_object_sightings\(jsonb\)/i);
 });
 
 test("structured vision normalization keeps precise appearance and direct PUT_DOWN events", () => {
