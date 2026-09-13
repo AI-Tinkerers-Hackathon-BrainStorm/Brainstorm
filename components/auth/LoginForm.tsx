@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, LoaderCircle, Lock, Mail, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ type Pending = null | "credentials" | "guest" | string;
 
 export function LoginForm() {
   const router = useRouter();
-  const { signIn, signInAsDemoUser, signInAsGuest } = useAuth();
+  const { status, signIn, signInAsDemoUser, signInAsGuest } = useAuth();
   const emailId = useId();
   const passwordId = useId();
   const errorId = useId();
@@ -27,6 +27,20 @@ export function LoginForm() {
   const [pending, setPending] = useState<Pending>(null);
 
   const busy = pending !== null;
+
+  useEffect(() => {
+    if (status === "authenticated") router.replace("/");
+  }, [router, status]);
+
+  if (status !== "unauthenticated") {
+    return (
+      <main className="grid min-h-dvh place-items-center px-6">
+        <p role="status" className="text-base text-muted-foreground">
+          {status === "loading" ? "Loading SightLoop…" : "Returning to SightLoop…"}
+        </p>
+      </main>
+    );
+  }
 
   async function run(key: Pending, action: () => Promise<void>) {
     setError("");
@@ -194,7 +208,8 @@ export function LoginForm() {
           Demo accounts
         </h2>
         <p className="mt-2 text-sm leading-5 text-muted-foreground">
-          Each account keeps its own separate agent memory. Password for all three is{" "}
+          These named profiles are demo shortcuts. Cloud memory belongs to this browser&apos;s anonymous session.
+          Password for all three is{" "}
           <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">{DEMO_PASSWORD}</code>.
         </p>
         <ul className="mt-3 space-y-2">

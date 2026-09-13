@@ -36,6 +36,6 @@ export interface AuthProvider {
   /** Anonymous session with its own isolated memory namespace. */
   signInAsGuest(): Promise<Session>;
   signOut(): Promise<void>;
-  /** Synchronously read any persisted session. Returns null when signed out. */
-  restore(): Session | null;
+  /** Restore the local display session and its Supabase-backed memory identity. */
+  restore(): Promise<Session | null>;
 }

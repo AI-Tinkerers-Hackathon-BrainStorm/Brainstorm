@@ -23,7 +23,7 @@ The current implementation includes:
 - **Scene questions:** Answer questions such as “What can you see?” using recent observations.
 - **Object finding:** Maintain a FIND goal and verify candidate objects against subsequent observations.
 - **Text reading:** Invoke a dedicated OCR path for explicit READ requests.
-- **Object memory:** Record object names, colors, spatial relationships, timestamps, and evidence.
+- **Object memory:** Record object names, colors, spatial relationships, timestamps, and evidence in bounded local state, with optional Supabase persistence.
 - **Location recall:** Answer questions such as “Where are my keys?” while distinguishing current visibility from last-seen information.
 - **Detailed scanning:** Analyze a high-resolution still image, return a fast result, and perform Max refinement when appropriate.
 - **Voice interaction:** Support Qwen WebRTC and fallback paths using browser speech recognition and speech synthesis.
@@ -324,6 +324,7 @@ It does not make the entire application operate offline.
 - Node.js **22.13.0 or newer**.
 - npm.
 - A valid DashScope API key.
+- A Supabase project when cloud memory is enabled.
 - Access to the required workspace, region, and models.
 - A browser capable of accessing the camera and microphone.
 
@@ -380,7 +381,13 @@ QWEN_TEXT_MODEL=qwen3.8-flash
 QWEN_VISION_MODEL=qwen3.8-flash
 QWEN_DEEP_VISION_MODEL=qwen3.8-max
 QWEN_OCR_MODEL=qwen3.5-ocr
+
+# Required for cloud memory
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_publishable_key
 ```
+
+Enable Supabase Anonymous Sign-Ins and apply the checked-in migrations described in [Supabase setup](docs/SUPABASE.md).
 
 Important:
 
@@ -434,7 +441,7 @@ Do not expose unprotected, billable model endpoints through a public tunnel.
 1. Push the desired code branch to GitHub.
 2. Import the repository into Vercel using the Next.js project configuration.
 3. Configure server-side environment variables separately for Preview and Production as needed.
-4. Verify `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, and any model overrides.
+4. Verify `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, the Supabase variables, and any model overrides.
 5. Create a deployment and inspect its build result and source commit.
 6. Test the HTTPS Preview on physical devices.
 7. Merge or promote to Production only after device validation.
@@ -602,6 +609,8 @@ This script uses a synthetic image to exercise background vision, fast scanning,
 
 **It sends real model requests and may incur charges.**
 
+Use the timed script in [docs/DEMO.md](docs/DEMO.md). It covers Find, OCR, five-minute object memory, notebook-relative bottle placement, memory-assisted re-identification, and low-bandwidth failure recovery.
+
 It does not validate camera permissions, WebRTC audio, the iPhone speaker, or recognition accuracy in real scenes.
 
 ### Suggested Physical-Device Acceptance Test
@@ -625,9 +634,9 @@ Sampled images are transmitted to the model service. WebRTC may transmit audio a
 
 Therefore, **not storing raw video does not mean media remains entirely on the device, nor does it describe the upstream provider’s data handling policies.**
 
-### Local Data
+### Structured Memory
 
-Structured memory may contain sensitive information about personal objects and their locations. Users on shared devices should understand the site’s storage behavior and clear site data when appropriate.
+Structured memory may contain sensitive information about personal objects and their locations. When Supabase is configured, the demo stores bounded structured object and placement records under an anonymous Supabase identity; it does not store raw frames or video. The anonymous identity can survive refreshes in the same browser, but it is not yet a durable cross-device account.
 
 Current demo accounts support frontend workflows and local memory namespaces only. They do not provide a secure isolation boundary.
 
@@ -658,7 +667,9 @@ Main directories:
 - `src/performance/`: Adaptive sampling quality and performance measurements.
 - `src/auth/`: Demonstration authentication.
 - `src/config/`: Model and environment configuration.
+- `src/lib/supabase/`: Supabase client and cloud-memory synchronization.
 - `src/tests/`: Automated tests.
+- `supabase/migrations/`: Database schema, ownership hardening, and retention jobs.
 - `docs/`: Architecture, safety, performance, and usage documentation.
 
 Further reading:
@@ -668,6 +679,7 @@ Further reading:
 - [Performance and Backpressure](docs/PERFORMANCE.md)
 - [Safety and Privacy](docs/SAFETY.md)
 - [API Setup](docs/API_SETUP.md)
+- [Supabase Setup](docs/SUPABASE.md)
 - [Demo Guide](docs/DEMO.md)
 - [Libraries](docs/LIBRARIES.md)
 

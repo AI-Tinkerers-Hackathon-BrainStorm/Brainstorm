@@ -1,4 +1,4 @@
-import type { DetectedObject, GoalAssessment, NormalizedBBox, OCRText, SpatialPosition, VisionObservation } from "../../types/index.ts";
+import type { DetectedObject, GoalAssessment, NormalizedBBox, OCRText, PlacementObservation, SpatialPosition, VisionObservation } from "../../types/index.ts";
 
 const clamp = (value: unknown) => Math.max(0, Math.min(1, Number(value) || 0));
 
@@ -17,8 +17,15 @@ function normalizeBox(value: unknown): NormalizedBBox | undefined {
 
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const items = value.filter((item): item is string => typeof item === "string").slice(0, 8);
+  const items = [...new Set(value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().replace(/\s+/g, " "))
+    .filter(Boolean))].slice(0, 8);
   return items.length ? items : undefined;
+}
+
+function limitedString(value: unknown, maxLength: number): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim().replace(/\s+/g, " ").slice(0, maxLength) : undefined;
 }
 
 export function normalizeObservation(
@@ -29,14 +36,16 @@ export function normalizeObservation(
 ): VisionObservation {
   const objects = Array.isArray(raw.objects) ? raw.objects.slice(0, 30).map((item): DetectedObject | null => {
     const value = item as Record<string, unknown>;
-    if (typeof value.label !== "string") return null;
+    const label = limitedString(value.label, 100);
+    if (!label) return null;
     const bbox = normalizeBox(value.bbox);
     return {
-      label: value.label.slice(0, 100),
+      label,
       aliases: stringArray(value.aliases),
       bbox,
       center: bbox ? { x: (bbox.x1 + bbox.x2) / 2, y: (bbox.y1 + bbox.y2) / 2 } : undefined,
-      color: typeof value.color === "string" ? value.color.slice(0, 40) : undefined,
+      color: limitedString(value.color, 40),
+      appearance: limitedString(value.appearance, 240),
       attributes: stringArray(value.attributes),
       spatialRelation: stringArray(value.spatialRelation),
       confidence: clamp(value.confidence),
@@ -50,13 +59,38 @@ export function normalizeObservation(
     return { text: value.text.slice(0, 2_000), bbox: normalizeBox(value.bbox), confidence: value.confidence === undefined ? undefined : clamp(value.confidence) };
   }).filter((item): item is OCRText => item !== null) : [];
 
+  const placementEvents = Array.isArray(raw.placementEvents) ? raw.placementEvents.slice(0, 4).map((item): PlacementObservation | null => {
+    const value = item as Record<string, unknown>;
+    const subject = limitedString(value.subject, 100);
+    const relation = limitedString(value.relation, 80);
+    const anchor = limitedString(value.anchor, 100);
+    const location = limitedString(value.location, 240);
+    if (value.type !== "PUT_DOWN" || !subject || !relation || !anchor || !location) return null;
+    return {
+      type: "PUT_DOWN",
+      subject,
+      relation,
+      anchor,
+      location,
+      appearance: limitedString(value.appearance, 240),
+      color: limitedString(value.color, 40),
+      confidence: clamp(value.confidence),
+    };
+  }).filter((item): item is PlacementObservation => item !== null) : [];
+
   const goalRaw = raw.goalAssessment as Record<string, unknown> | undefined;
   const positions: SpatialPosition[] = ["far-left", "left", "center-left", "center", "center-right", "right", "far-right"];
   const guidances: NonNullable<GoalAssessment["guidance"]>[] = ["LEFT", "RIGHT", "CENTER", "HOLD", "NONE"];
+  const candidateObjectIndex = Number(goalRaw?.candidateObjectIndex);
   const goalAssessment = goalRaw ? {
     relevant: Boolean(goalRaw.relevant),
     targetVisible: Boolean(goalRaw.targetVisible),
     candidateConfidence: clamp(goalRaw.candidateConfidence),
+    candidateObjectIndex: Number.isInteger(candidateObjectIndex)
+      && candidateObjectIndex >= 0
+      && candidateObjectIndex < objects.length
+      ? candidateObjectIndex
+      : undefined,
     spatialPosition: positions.includes(goalRaw.spatialPosition as SpatialPosition) ? goalRaw.spatialPosition as SpatialPosition : undefined,
     guidance: guidances.includes(goalRaw.guidance as NonNullable<GoalAssessment["guidance"]>) ? goalRaw.guidance as NonNullable<GoalAssessment["guidance"]> : "NONE",
     shouldSpeak: Boolean(goalRaw.shouldSpeak),
@@ -81,6 +115,7 @@ export function normalizeObservation(
     cameraMotion: raw.cameraMotion === "medium" || raw.cameraMotion === "high" ? raw.cameraMotion : "low",
     source,
     goalAssessment,
+    placementEvents,
     model,
   };
 }

@@ -1,5 +1,6 @@
 import { DEMO_ACCOUNTS, GUEST_USER } from "./demoUsers.ts";
 import { AuthError, type AuthProvider, type Session } from "./types.ts";
+import { ensureSupabaseMemorySession, signOutSupabaseMemorySession } from "../lib/supabase/browser.ts";
 
 const SESSION_KEY = "sightloop:session:v1";
 
@@ -19,13 +20,34 @@ function persist(session: Session | null): void {
   }
 }
 
+async function prepareCloudMemory(): Promise<void> {
+  try {
+    await ensureSupabaseMemorySession();
+  } catch {
+    // Demo display auth remains usable offline. The memory store reports cloud
+    // status and retries after the app opens.
+  }
+}
+
+function readPersistedSession(): Session | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<Session>;
+    if (!parsed?.user?.id || !parsed.user.email) return null;
+    return { user: parsed.user as Session["user"], createdAt: parsed.createdAt ?? Date.now() };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Frontend-only authentication.
+ * Demo display authentication backed by an anonymous Supabase memory identity.
  *
- * WARNING — demo build only. There is no password hashing, no token, and no
- * server check. Anyone can edit localStorage and sign in as any user. This is
- * acceptable because the app currently holds nothing per-user except on-device
- * agent memory. Replace this entire class before any real deployment.
+ * WARNING — the visible email/password check is still frontend-only and is not
+ * a durable user account. Cloud rows are isolated by the Supabase Auth UUID,
+ * never by the editable demo user id. Replace this class with real Supabase Auth
+ * before treating the named profiles as private or multi-device accounts.
  */
 export class DemoAuthProvider implements AuthProvider {
   async signIn(email: string, password: string): Promise<Session> {
@@ -35,6 +57,7 @@ export class DemoAuthProvider implements AuthProvider {
     if (!account || account.password !== password) {
       throw new AuthError("That email and password combination is not recognised.", "invalid_credentials");
     }
+    await prepareCloudMemory();
     const session: Session = { user: account.user, createdAt: Date.now() };
     persist(session);
     return session;
@@ -44,6 +67,7 @@ export class DemoAuthProvider implements AuthProvider {
     await wait();
     const account = DEMO_ACCOUNTS.find((item) => item.user.id === userId);
     if (!account) throw new AuthError("That demo account does not exist.", "invalid_credentials");
+    await prepareCloudMemory();
     const session: Session = { user: account.user, createdAt: Date.now() };
     persist(session);
     return session;
@@ -51,6 +75,7 @@ export class DemoAuthProvider implements AuthProvider {
 
   async signInAsGuest(): Promise<Session> {
     await wait();
+    await prepareCloudMemory();
     const session: Session = { user: GUEST_USER, createdAt: Date.now() };
     persist(session);
     return session;
@@ -58,17 +83,16 @@ export class DemoAuthProvider implements AuthProvider {
 
   async signOut(): Promise<void> {
     persist(null);
+    await signOutSupabaseMemorySession();
   }
 
-  restore(): Session | null {
-    try {
-      const raw = localStorage.getItem(SESSION_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as Partial<Session>;
-      if (!parsed?.user?.id || !parsed.user.email) return null;
-      return { user: parsed.user as Session["user"], createdAt: parsed.createdAt ?? Date.now() };
-    } catch {
+  async restore(): Promise<Session | null> {
+    const session = readPersistedSession();
+    if (!session) {
+      await signOutSupabaseMemorySession();
       return null;
     }
+    await prepareCloudMemory();
+    return session;
   }
 }

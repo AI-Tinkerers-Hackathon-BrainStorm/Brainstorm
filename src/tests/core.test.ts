@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { AgentStateMachine } from "../agent/AgentStateMachine.ts";
 import { AgentOrchestrator } from "../agent/AgentOrchestrator.ts";
 import { composeAbsenceReply, composeSceneInventory, hasUsefulObjectInventory, scanAddsNewObjects } from "../agent/EvidenceReply.ts";
@@ -10,6 +12,8 @@ import { ASR_WATCHDOG_MS, shouldFallbackUnansweredTurn } from "../agent/TurnWatc
 import { SaliencePolicy } from "../agent/SaliencePolicy.ts";
 import { ToolDispatcher } from "../agent/ToolDispatcher.ts";
 import { EpisodicMemory } from "../memory/EpisodicMemory.ts";
+import { RecentObjectMemory } from "../memory/RecentObjectMemory.ts";
+import { SupabaseMemoryStore, type SupabaseMemoryDependencies } from "../memory/SupabaseMemoryStore.ts";
 import { WorkingMemory } from "../memory/WorkingMemory.ts";
 import { DetailedSceneMemory } from "../memory/DetailedSceneMemory.ts";
 import { LatestFrameProcessor } from "../media/LatestFrameProcessor.ts";
@@ -19,11 +23,12 @@ import { AdaptiveQualityController } from "../performance/AdaptiveQualityControl
 import { EntityTracker } from "../temporal/EntityTracker.ts";
 import { TemporalReasoner } from "../temporal/TemporalReasoner.ts";
 import { parseJsonContent } from "../providers/server/QwenClient.ts";
+import { normalizeObservation } from "../providers/server/normalize.ts";
 import { VISION_RESPONSE_FORMAT } from "../providers/server/VisionSchema.ts";
 import { selectVisionRoute } from "../providers/server/VisionRouting.ts";
 import { runFastWithMaxFallback, shouldTryMaxAfterFastFailure, VisionClientError } from "../providers/DeepVisionProvider.ts";
 import { canReportWebRtcConnected, QwenRealtimeProvider, shouldEmitRealtimeAgentOutput } from "../providers/QwenRealtimeProvider.ts";
-import type { AgentGoal, DetectedObject, MemoryEvent, VisionObservation } from "../types/index.ts";
+import type { AgentGoal, DetectedObject, MemoryEvent, RecentObjectMemoryRecord, VisionObservation } from "../types/index.ts";
 
 function observation(id: string, capturedAt: number, objects: DetectedObject[] = [], cameraMotion: VisionObservation["cameraMotion"] = "low"): VisionObservation {
   return {
@@ -34,6 +39,40 @@ function observation(id: string, capturedAt: number, objects: DetectedObject[] =
 
 function bottle(x1: number, x2: number, confidence = 0.9): DetectedObject {
   return { label: "bottle", color: "red", bbox: { x1, y1: 0.2, x2, y2: 0.8 }, confidence, source: "deep_vision" };
+}
+
+function notebook(confidence = 0.92): DetectedObject {
+  return {
+    label: "notebook",
+    color: "silver",
+    bbox: { x1: 0.3, y1: 0.35, x2: 0.55, y2: 0.75 },
+    confidence,
+    source: "deep_vision",
+  };
+}
+
+function supabaseSession(id: string): Session {
+  return { user: { id } } as Session;
+}
+
+function fakeSupabaseClient(calls: string[]): SupabaseClient {
+  return {
+    from(table: string) {
+      calls.push(`select:${table}`);
+      const query = {
+        select() { return query; },
+        eq() { return query; },
+        order() { return query; },
+        limit: async () => ({ data: [], error: null }),
+      };
+      return query;
+    },
+    async rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push(`rpc:${name}`);
+      if (parameters?.expected_owner) calls.push(`owner:${String(parameters.expected_owner)}`);
+      return { data: name === "read_recent_object_memories" ? [] : 1, error: null };
+    },
+  } as unknown as SupabaseClient;
 }
 
 function cup(confidence = 0.88): DetectedObject {
@@ -75,7 +114,410 @@ test("EpisodicMemory never promotes last seen to currently visible", () => {
   assert.equal(memory.recall("keys").state, "LAST_SEEN");
   assert.match(memory.formatRecall("keys"), /last saw/i);
   assert.match(memory.formatRecall("keys"), /can’t confirm/i);
-  assert.equal(memory.recall("keys", observation("2", 200, [{ label: "keys", confidence: 0.91, source: "deep_vision" }])).state, "CURRENTLY_VISIBLE");
+  const current = observation("2", 200, [{ label: "keys", confidence: 0.91, source: "deep_vision" }]);
+  assert.equal(memory.recall("keys", current, undefined, 200).state, "CURRENTLY_VISIBLE");
+  assert.equal(memory.recall("keys", current, undefined, 5_201).state, "LAST_SEEN");
+});
+
+test("RecentObjectMemory records every fresh recognizable object, merges sightings, and expires at five minutes", () => {
+  const memory = new RecentObjectMemory([], 500, 300_000);
+  memory.observe({
+    ...observation("one", 1_000, [
+      { ...bottle(0.6, 0.75), appearance: "matte red metal bottle with black cap", spatialRelation: ["right of the notebook", "on the desk"] },
+      { label: "blur", confidence: 0.44, source: "deep_vision" },
+    ]),
+  });
+  memory.observe({
+    ...observation("two", 2_000, [
+      { ...bottle(0.62, 0.77, 0.86), label: " Bottle ", color: " RED ", appearance: "black cap, matte metal red bottle", spatialRelation: ["beside the notebook"] },
+    ]),
+  });
+  memory.observe(observation("three", 3_000, [
+    { ...bottle(0.63, 0.78, 0.84), appearance: undefined, spatialRelation: ["right of the notebook"] },
+  ]));
+
+  const [record] = memory.all(3_000);
+  assert.equal(record.identityKey, "bottle|red|black bottle cap matte metal red");
+  assert.equal(record.firstSeenAt, 1_000);
+  assert.equal(record.lastSeenAt, 3_000);
+  assert.equal(record.seenCount, 3);
+  assert.deepEqual(record.spatialRelation, ["right of the notebook"]);
+  assert.deepEqual(record.evidence.frameIds, ["one", "two", "three"]);
+  assert.equal(memory.recall("my red bottle", 3_000)?.identityKey, record.identityKey);
+  assert.equal(memory.all(303_001).length, 0);
+});
+
+test("RecentObjectMemory hydration is idempotent and merges with live sightings", () => {
+  const now = Date.now();
+  const memory = new RecentObjectMemory();
+  memory.observe(observation("local", now, [{ ...bottle(0.6, 0.75), appearance: "red bottle" }]));
+  const remote: RecentObjectMemoryRecord = {
+    identityKey: "keys||brass keys",
+    label: "keys",
+    appearance: "brass keys",
+    confidence: 0.8,
+    firstSeenAt: now - 500,
+    lastSeenAt: now - 100,
+    seenCount: 2,
+    evidence: { frameIds: ["remote"], observationIds: ["obs-remote"] },
+    epistemic: "LAST_SEEN",
+  };
+  memory.merge([remote], now);
+  memory.merge([remote], now);
+  assert.deepEqual(memory.all(now).map((item) => item.label).sort(), ["bottle", "keys"]);
+  assert.equal(memory.recall("keys", now)?.seenCount, 2);
+});
+
+test("SupabaseMemoryStore queues before hydration and pins all writes to one auth UID", async () => {
+  const calls: string[] = [];
+  const client = fakeSupabaseClient(calls);
+  let activeSession = supabaseSession("owner-a");
+  let ensureCalls = 0;
+  let releaseSession!: (session: Session) => void;
+  const initialSession = new Promise<Session>((resolve) => { releaseSession = resolve; });
+  const dependencies: SupabaseMemoryDependencies = {
+    isConfigured: () => true,
+    getClient: () => client,
+    ensureSession: async () => {
+      ensureCalls += 1;
+      return initialSession;
+    },
+    getSession: async () => activeSession,
+  };
+  const store = new SupabaseMemoryStore(() => undefined, dependencies);
+  const event: MemoryEvent = {
+    id: "queued-placement",
+    timestamp: Date.now(),
+    subject: "bottle",
+    action: "PUT_DOWN",
+    location: "right of the notebook",
+    relation: "right of",
+    anchor: "notebook",
+    appearance: "matte red metal bottle",
+    confidence: 0.9,
+    evidence: { frameIds: ["frame-a"], observationIds: ["obs-a"] },
+    epistemic: "LAST_SEEN",
+  };
+
+  const loading = store.load();
+  store.queueSnapshot({ memory: [event], recentObjects: [] });
+  await Promise.resolve();
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 0);
+  releaseSession(activeSession);
+  await loading;
+  await store.flush();
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 1);
+  assert.ok(calls.includes("owner:owner-a"));
+  assert.equal(ensureCalls, 1);
+
+  activeSession = supabaseSession("owner-b");
+  store.queueSnapshot({ memory: [{ ...event, location: "changed after UID switch" }], recentObjects: [] });
+  await store.flush();
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 1);
+  assert.equal(ensureCalls, 1);
+});
+
+test("SupabaseMemoryStore retries initial session setup when a new snapshot arrives", async () => {
+  const calls: string[] = [];
+  const client = fakeSupabaseClient(calls);
+  const session = supabaseSession("owner-a");
+  let ensureCalls = 0;
+  const dependencies: SupabaseMemoryDependencies = {
+    isConfigured: () => true,
+    getClient: () => client,
+    ensureSession: async () => {
+      ensureCalls += 1;
+      if (ensureCalls === 1) throw new Error("temporary auth failure");
+      return session;
+    },
+    getSession: async () => session,
+  };
+  const store = new SupabaseMemoryStore(() => undefined, dependencies);
+  await assert.rejects(store.load(), /temporary auth failure/i);
+  store.queueSnapshot({
+    memory: [{
+      id: "retry-placement", timestamp: Date.now(), subject: "bottle", action: "PUT_DOWN",
+      location: "to the right of notebook", relation: "right of", anchor: "notebook",
+      appearance: "matte red bottle", confidence: 0.9,
+      evidence: { frameIds: ["retry-frame"], observationIds: ["retry-observation"] }, epistemic: "LAST_SEEN",
+    }],
+    recentObjects: [],
+  });
+  await store.flush();
+  assert.equal(ensureCalls, 2);
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 1);
+});
+
+test("SupabaseMemoryStore never writes after stop when initial auth resolves late", async () => {
+  const calls: string[] = [];
+  const client = fakeSupabaseClient(calls);
+  let releaseSession!: (session: Session) => void;
+  const delayedSession = new Promise<Session>((resolve) => { releaseSession = resolve; });
+  const dependencies: SupabaseMemoryDependencies = {
+    isConfigured: () => true,
+    getClient: () => client,
+    ensureSession: async () => delayedSession,
+    getSession: async () => supabaseSession("late-owner"),
+  };
+  const store = new SupabaseMemoryStore(() => undefined, dependencies);
+  store.queueSnapshot({
+    memory: [{
+      id: "late-placement", timestamp: Date.now(), subject: "bottle", action: "PUT_DOWN",
+      location: "to the right of notebook", relation: "right of", anchor: "notebook",
+      appearance: "matte red bottle", confidence: 0.9,
+      evidence: { frameIds: ["late-frame"], observationIds: ["late-observation"] }, epistemic: "LAST_SEEN",
+    }],
+    recentObjects: [],
+  });
+  await Promise.resolve();
+  store.stop();
+  releaseSession(supabaseSession("late-owner"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(calls.filter((call) => call === "rpc:upsert_episodic_memory_events").length, 0);
+});
+
+test("Supabase migration exposes reads only and serializes bounded RPC writes", () => {
+  const migration = readFileSync(
+    new URL("../../supabase/migrations/202609120002_visual_memory_hardening.sql", import.meta.url),
+    "utf8",
+  );
+  const cron = readFileSync(
+    new URL("../../supabase/migrations/202609120003_visual_memory_retention_cron.sql", import.meta.url),
+    "utf8",
+  );
+  const ownerBinding = readFileSync(
+    new URL("../../supabase/migrations/202609120004_visual_memory_owner_binding.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /revoke all on table public\.recent_object_memories from anon, authenticated/i);
+  assert.match(migration, /grant select on table public\.episodic_memory_events to authenticated/i);
+  assert.equal(migration.match(/pg_advisory_xact_lock/g)?.length, 2);
+  assert.match(migration, /offset 500/i);
+  assert.match(migration, /offset 100/i);
+  assert.match(migration, /expires_at > statement_timestamp\(\)/i);
+  assert.match(cron, /cron\.schedule/i);
+  assert.equal(ownerBinding.match(/auth\.uid\(\) is distinct from expected_owner/gi)?.length, 3);
+  assert.match(ownerBinding, /revoke all on function public\.merge_recent_object_sightings\(jsonb\)/i);
+});
+
+test("structured vision normalization keeps precise appearance and direct PUT_DOWN events", () => {
+  const capturedAt = Date.now();
+  const placed = normalizeObservation({
+    sceneSummary: "A bottle was placed to the right of a notebook.",
+    cameraMotion: "low",
+    objects: [
+      { label: "bottle", color: "red", appearance: "matte red metal bottle with a black cap", confidence: 0.94 },
+      { label: "notebook", confidence: 0.9 },
+    ],
+    placementEvents: [{
+      type: "PUT_DOWN",
+      subject: "bottle",
+      relation: "right of",
+      anchor: "notebook",
+      location: "to the right of the notebook on the desk",
+      appearance: "matte red metal bottle with a black cap",
+      color: "red",
+      confidence: 0.91,
+    }],
+    text: [],
+    goalAssessment: { relevant: false, targetVisible: false, candidateConfidence: 0, shouldSpeak: false },
+  }, { frameId: "placed", capturedAt, requestSentAt: capturedAt + 1, purpose: "background" }, "deep_vision", "vision-model");
+
+  assert.equal(placed.objects[0]?.appearance, "matte red metal bottle with a black cap");
+  assert.equal(placed.placementEvents?.[0]?.anchor, "notebook");
+  assert.equal(placed.placementEvents?.[0]?.color, "red");
+});
+
+test("Agent stores only evidenced high-confidence placements", () => {
+  const agent = new AgentOrchestrator(() => undefined);
+  const capturedAt = Date.now();
+  agent.observe(observation("before-place", capturedAt, [
+    { ...bottle(0.42, 0.57), appearance: "matte red metal bottle with a black cap" },
+    notebook(),
+  ]));
+  agent.observe({
+    ...observation("placed-1", capturedAt + 1_000, [
+      { ...bottle(0.6, 0.75), appearance: "matte red metal bottle with a black cap" },
+      notebook(),
+    ]),
+    placementEvents: [{
+      type: "PUT_DOWN",
+      subject: "bottle",
+      relation: "right of",
+      anchor: "notebook",
+      location: "to the right of the notebook on the desk",
+      appearance: "matte red metal bottle with a black cap",
+      confidence: 0.91,
+    }],
+  });
+  const saved = agent.snapshot().memory.find((item) => item.action === "PUT_DOWN");
+  assert.equal(saved?.action, "PUT_DOWN");
+  assert.equal(saved?.anchor, "notebook");
+  assert.equal(saved?.relation, "right of");
+  assert.equal(saved?.location, "to the right of notebook");
+  assert.equal(saved?.appearance, "matte red metal bottle with a black cap");
+  assert.deepEqual(saved?.evidence.frameIds, ["before-place", "placed-1"]);
+
+  agent.observe({
+    ...observation("unanchored", capturedAt + 1_001, [bottle(0.6, 0.75)]),
+    placementEvents: [{ type: "PUT_DOWN", subject: "bottle", relation: "right of", anchor: "notebook", location: "right of notebook", confidence: 0.99 }],
+  });
+  agent.observe({
+    ...observation("uncertain", capturedAt + 1_002, [bottle(0.6, 0.75), notebook()]),
+    placementEvents: [{ type: "PUT_DOWN", subject: "bottle", relation: "right of", anchor: "notebook", location: "right of notebook", confidence: 0.74 }],
+  });
+  assert.equal(agent.snapshot().memory.filter((item) => item.action === "PUT_DOWN").length, 1);
+
+  const staticAgent = new AgentOrchestrator(() => undefined);
+  staticAgent.observe(observation("static-before", capturedAt, [bottle(0.6, 0.75), notebook()]));
+  staticAgent.observe({
+    ...observation("static-after", capturedAt + 1_000, [bottle(0.6, 0.75), notebook()]),
+    placementEvents: [{
+      type: "PUT_DOWN", subject: "bottle", relation: "right of", anchor: "notebook",
+      location: "right of notebook", confidence: 0.99,
+    }],
+  });
+  assert.equal(staticAgent.snapshot().memory.some((item) => item.action === "PUT_DOWN"), false);
+});
+
+test("Realtime remember_event is anchored to the latest fresh observation", async () => {
+  const agent = new AgentOrchestrator(() => undefined);
+  agent.setVisionActive(true);
+  agent.observe(observation("latest-frame", Date.now(), [{ ...bottle(0.6, 0.75), appearance: "matte red bottle" }, notebook()]));
+  await agent.tools.dispatch("remember_event", {
+    subject: "bottle",
+    action: "PUT_DOWN",
+    relation: "right of",
+    anchor: "notebook",
+    location: "to the right of the notebook on the desk",
+    appearance: "matte red bottle",
+    color: "red",
+    confidence: 0.88,
+  });
+  const saved = agent.snapshot().memory[0];
+  assert.deepEqual(saved?.evidence.frameIds, ["latest-frame"]);
+  assert.equal(saved?.epistemic, "LAST_SEEN");
+
+  const invalid = new AgentOrchestrator(() => undefined);
+  invalid.setVisionActive(true);
+  invalid.observe(observation("bottle-only", Date.now(), [bottle(0.6, 0.75)]));
+  await assert.rejects(invalid.tools.dispatch("remember_event", {
+    subject: "bottle", action: "PUT_DOWN", relation: "right of", anchor: "notebook",
+    location: "right of notebook", appearance: "red bottle", confidence: 0.9,
+  }), /matching current subject and anchor evidence/i);
+
+  const wrongSide = new AgentOrchestrator(() => undefined);
+  wrongSide.setVisionActive(true);
+  wrongSide.observe(observation("wrong-side", Date.now(), [{ ...bottle(0.6, 0.75), appearance: "matte red bottle" }, notebook()]));
+  await assert.rejects(wrongSide.tools.dispatch("remember_event", {
+    subject: "bottle", action: "PUT_DOWN", relation: "left of", anchor: "notebook",
+    location: "left of notebook", appearance: "matte red bottle", confidence: 0.9,
+  }), /does not match current object geometry/i);
+});
+
+test("recall_memory stops describing an object as current when the camera stops", async () => {
+  const now = Date.now();
+  const saved: MemoryEvent = {
+    id: "last-seen-keys",
+    timestamp: now - 1_000,
+    subject: "keys",
+    action: "LAST_SEEN",
+    location: "on the desk",
+    confidence: 0.85,
+    evidence: { frameIds: ["old"], observationIds: ["obs-old"] },
+    epistemic: "LAST_SEEN",
+  };
+  const agent = new AgentOrchestrator(() => undefined, [saved]);
+  agent.setVisionActive(true);
+  agent.observe(observation("current-keys", now, [{ label: "keys", appearance: "brass keyring", confidence: 0.9, source: "deep_vision" }]));
+  assert.match(String(await agent.tools.dispatch("recall_memory", { subject: "keys" })), /I can see/i);
+  agent.setVisionActive(false);
+  const afterStop = String(await agent.tools.dispatch("recall_memory", { subject: "keys" }));
+  assert.doesNotMatch(afterStop, /I can see/i);
+  assert.match(afterStop, /last saw/i);
+});
+
+test("where-did-I-put prefers placement memory, falls back to recent memory, and starts a conservative find", () => {
+  const now = Date.now();
+  const placed: MemoryEvent = {
+    id: "placed", timestamp: now - 1_000, subject: "bottle", action: "PUT_DOWN", location: "to the right of the notebook on the desk",
+    relation: "right of", anchor: "notebook", appearance: "matte red bottle", attributes: { color: "red" }, confidence: 0.9,
+    evidence: { frameIds: ["old"], observationIds: ["obs-old"] }, epistemic: "LAST_SEEN",
+  };
+  const recent: RecentObjectMemoryRecord = {
+    identityKey: "bottle|red|matte red bottle", label: "bottle", color: "red", appearance: "matte red bottle",
+    spatialRelation: ["left of the keyboard"], confidence: 0.86, firstSeenAt: now - 500, lastSeenAt: now - 200, seenCount: 1,
+    evidence: { frameIds: ["recent"], observationIds: ["obs-recent"] }, epistemic: "LAST_SEEN",
+  };
+  const spoken: string[] = [];
+  const placementAgent = new AgentOrchestrator((text) => spoken.push(text), [placed], {}, [], [recent]);
+  assert.equal(placementAgent.setGoal("Where did I put my bottle?").type, "review");
+  assert.equal(placementAgent.snapshot().mode, "FIND");
+  assert.match(spoken.at(-1) ?? "", /right of the notebook/i);
+  assert.doesNotMatch(spoken.at(-1) ?? "", /left of the keyboard/i);
+
+  const fallbackSpoken: string[] = [];
+  const fallbackAgent = new AgentOrchestrator((text) => fallbackSpoken.push(text), [], {}, [], [recent]);
+  fallbackAgent.setGoal("Where did I put my bottle?");
+  assert.equal(fallbackAgent.snapshot().mode, "FIND");
+  assert.match(fallbackSpoken.at(-1) ?? "", /left of the keyboard/i);
+});
+
+test("memory-assisted find reports uncertainty after sustained misses and uses two matches", () => {
+  const now = Date.now();
+  const placed: MemoryEvent = {
+    id: "placed", timestamp: now - 1_000, subject: "bottle", action: "PUT_DOWN", location: "right of the notebook",
+    appearance: "matte red bottle", confidence: 0.9, evidence: { frameIds: ["old"], observationIds: ["obs-old"] }, epistemic: "LAST_SEEN",
+  };
+  const spoken: string[] = [];
+  const agent = new AgentOrchestrator((text) => spoken.push(text), [placed]);
+  agent.setGoal("Where did I put my bottle?");
+  for (let index = 0; index < 4; index += 1) {
+    agent.observe({
+      ...observation(`miss-${index}`, now + index * 2_000),
+      goalAssessment: { relevant: true, targetVisible: false, candidateConfidence: 0, guidance: "NONE", shouldSpeak: false },
+    });
+  }
+  assert.match(spoken.at(-1) ?? "", /may have been moved|outside the camera view/i);
+
+  const possibleMatch = {
+    relevant: true, targetVisible: true, candidateConfidence: 0.88, candidateObjectIndex: 0, spatialPosition: "right" as const,
+    guidance: "HOLD" as const, shouldSpeak: true, speech: "Possible red bottle on the right.",
+  };
+  agent.observe({
+    ...observation("wrong-appearance", now + 6_500, [{
+      ...bottle(0.7, 0.82),
+      appearance: "glossy clear plastic red bottle",
+    }]),
+    goalAssessment: possibleMatch,
+  });
+  assert.equal(agent.snapshot().confirmationCount, 0);
+  const matchingBottle = { ...bottle(0.7, 0.82), appearance: "red matte bottle" };
+  agent.observe({ ...observation("match-1", now + 7_000, [matchingBottle]), goalAssessment: possibleMatch });
+  assert.equal(agent.snapshot().status, "VERIFYING");
+  agent.observe({ ...observation("match-1", now + 7_050, [matchingBottle]), goalAssessment: possibleMatch });
+  assert.equal(agent.snapshot().status, "VERIFYING");
+  assert.equal(agent.snapshot().confirmationCount, 1);
+  agent.observe({ ...observation("match-2", now + 7_100, [{ ...bottle(0.71, 0.83), appearance: "matte red bottle" }]), goalAssessment: possibleMatch });
+  assert.equal(agent.snapshot().status, "TARGET_FOUND");
+  assert.match(spoken.at(-1) ?? "", /may be your bottle/i);
+});
+
+test("hydration merges persisted and live memory instead of replacing either", () => {
+  const now = Date.now();
+  const agent = new AgentOrchestrator(() => undefined);
+  agent.observe(observation("live", now, [{ ...bottle(0.6, 0.75), appearance: "red bottle" }]));
+  const event: MemoryEvent = {
+    id: "persisted-event", timestamp: now - 1_000, subject: "keys", action: "PUT_DOWN", location: "on the shelf", confidence: 0.8,
+    evidence: { frameIds: ["persisted"], observationIds: ["obs-persisted"] }, epistemic: "LAST_SEEN",
+  };
+  const recent: RecentObjectMemoryRecord = {
+    identityKey: "keys||brass keys", label: "keys", appearance: "brass keys", confidence: 0.8, firstSeenAt: now - 900,
+    lastSeenAt: now - 800, seenCount: 1, evidence: { frameIds: ["persisted"], observationIds: ["obs-persisted"] }, epistemic: "LAST_SEEN",
+  };
+  agent.hydrateMemory([event], [recent]);
+  assert.deepEqual(agent.snapshot().memory.map((item) => item.subject), ["keys", "red bottle"]);
+  assert.deepEqual(agent.snapshot().recentObjects.map((item) => item.label).sort(), ["bottle", "keys"]);
 });
 
 test("EntityTracker keeps a nearby matching object identity and expires stale tracks", () => {
@@ -359,7 +801,7 @@ test("working observations become last-seen memory and stay distinct from curren
   const agent = new AgentOrchestrator(() => undefined, [], {}, [], { now: () => now });
   agent.observe(observation("1", 1, [cup(), { label: "person", confidence: 0.9, source: "deep_vision" }, { label: "hand", confidence: 0.8, source: "deep_vision" }]));
   assert.equal(agent.episodicMemory.recall("红色杯子").state, "LAST_SEEN");
-  assert.equal(agent.episodicMemory.recall("红色杯子", agent.workingMemory.latest()).state, "CURRENTLY_VISIBLE");
+  assert.equal(agent.episodicMemory.recall("红色杯子", agent.workingMemory.latest(), undefined, now).state, "CURRENTLY_VISIBLE");
   assert.match(agent.answerFromEvidence("杯子在哪") ?? "", /我(?:现在)?能看到|I can see/i);
   now = 2;
   agent.observe(observation("2", 2));

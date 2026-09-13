@@ -364,7 +364,28 @@ export class QwenRealtimeProvider implements RealtimeProvider {
         tools: [
           { type: "function", function: { name: "set_goal", description: "Set a continuing find, remember, monitor, or reading task.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
           { type: "function", function: { name: "clear_goal", description: "Stop the current visual task.", parameters: { type: "object", properties: {} } } },
-          { type: "function", function: { name: "remember_event", description: "Save a useful structured last-seen visual event.", parameters: { type: "object", properties: { subject: { type: "string" }, action: { type: "string" }, location: { type: "string" }, confidence: { type: "number" } }, required: ["subject", "action", "confidence"] } } },
+          {
+            type: "function",
+            function: {
+              name: "remember_event",
+              description: "Save a directly observed object placement with stable appearance and anchor-relative location. Never use static co-occurrence or inferred removal.",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  subject: { type: "string", description: "Plain object noun, for example bottle." },
+                  action: { type: "string", enum: ["PUT_DOWN"] },
+                  relation: { type: "string", description: "Observed relation, for example right of." },
+                  anchor: { type: "string", description: "Currently visible reference object, for example notebook." },
+                  location: { type: "string", description: "Complete anchor-relative location including the supporting surface." },
+                  appearance: { type: "string", description: "Stable visible material, shape, markings, cap, lid, or handle." },
+                  color: { type: "string" },
+                  confidence: { type: "number", minimum: 0, maximum: 1 },
+                },
+                required: ["subject", "action", "relation", "anchor", "location", "appearance", "confidence"],
+              },
+            },
+          },
           { type: "function", function: { name: "recall_memory", description: "Recall the latest structured event for a subject.", parameters: { type: "object", properties: { subject: { type: "string" } }, required: ["subject"] } } },
           { type: "function", function: { name: "request_deep_vision", description: "Run one high-resolution detailed current-scene inventory.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
           { type: "function", function: { name: "request_ocr", description: "Capture and read text from the current view.", parameters: { type: "object", properties: { reason: { type: "string" } } } } },
