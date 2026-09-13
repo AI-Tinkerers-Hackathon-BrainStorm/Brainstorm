@@ -387,6 +387,8 @@ NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_publishable_key
 ```
 
+Speech recognition uses the bundled multilingual `whisper.cpp` base-q5_1 runtime on Vercel. It requires no ASR API key; Vercel builds the runtime and model through `npm run vercel-build`. The CPU path is intended for a controlled demo and can take several seconds per short utterance.
+
 Enable Supabase Anonymous Sign-Ins and apply the checked-in migrations described in [Supabase setup](docs/SUPABASE.md).
 
 Important:

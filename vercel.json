@@ -1,0 +1,9 @@
+{
+  "buildCommand": "npm run vercel-build",
+  "functions": {
+    "app/api/transcribe/route.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
+}

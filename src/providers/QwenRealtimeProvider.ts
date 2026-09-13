@@ -354,11 +354,8 @@ export class QwenRealtimeProvider implements RealtimeProvider {
         voice: REALTIME_VOICE,
         instructions: REALTIME_AGENT_SYSTEM_PROMPT,
         audio: {
-          input: { format: { type: "pcm", sample_rate: 16_000 } },
           output: { format: { type: "pcm", sample_rate: 24_000 } },
         },
-        input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
-        turn_detection: { type: "semantic_vad", prefix_padding_ms: 350, silence_duration_ms: 500 },
         temperature: 0.35,
         max_tokens: 300,
         tools: [
@@ -403,9 +400,6 @@ export class QwenRealtimeProvider implements RealtimeProvider {
 
     const peer = new RTCPeerConnection({ iceServers: [] });
     this.peer = peer;
-    const audioTracks = this.media.getAudioTracks().filter((track) => track.enabled && track.readyState === "live");
-    if (!audioTracks.length) throw new Error("webrtc_source_audio_unavailable");
-    const audioSenders = audioTracks.map((track) => peer.addTrack(track, this.media!));
     peer.addEventListener("datachannel", (event) => this.bindDataChannel(event.channel));
 
     const canvas = document.createElement("canvas");
@@ -453,12 +447,9 @@ export class QwenRealtimeProvider implements RealtimeProvider {
       await videoSender.setParameters(parameters);
     } catch { /* Safari may not allow sender tuning before negotiation; the canvas remains capped at 1 FPS. */ }
 
-    await Promise.all([...audioSenders.map((sender) => sender.replaceTrack(null)), videoSender.replaceTrack(null)]);
+    await videoSender.replaceTrack(null);
     this.enableRealtimeMedia = async () => {
-      await Promise.all([
-        ...audioSenders.map((sender, index) => sender.replaceTrack(audioTracks[index])),
-        videoSender.replaceTrack(sampledVideoTrack),
-      ]);
+      await videoSender.replaceTrack(sampledVideoTrack);
     };
 
     const channel = peer.createDataChannel("oai-events");
@@ -565,15 +556,6 @@ export class QwenRealtimeProvider implements RealtimeProvider {
             this.setState("FALLBACK");
             this.closePeer();
           });
-      } else if (event.type === "input_audio_buffer.speech_started") {
-        this.startTurn({ turnId: `turn-${now}-${++this.turnSequence}` });
-      } else if (event.type === "input_audio_buffer.speech_stopped") {
-        this.markTurn({ speechEndAt: now });
-      } else if (event.type === "input_audio_buffer.committed") {
-        this.markTurn({ requestSentAt: now });
-      } else if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
-        this.markTurn({ transcriptAt: now });
-        this.emit("transcript", { role: "user", text: event.transcript, timing: this.telemetry.turn });
       } else if (event.type === "response.audio_transcript.done" && event.transcript) {
         this.markTurn({ firstModelEventAt: this.telemetry.turn?.firstModelEventAt ?? now });
         if (shouldEmitRealtimeAgentOutput(this.responseSuppressed)) this.emit("transcript", { role: "agent", text: event.transcript, timing: this.telemetry.turn });

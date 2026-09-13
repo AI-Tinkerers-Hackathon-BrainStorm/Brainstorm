@@ -5,6 +5,7 @@ export const MODELS = {
   deepVision: process.env.QWEN_VISION_MODEL ?? "qwen3.8-flash",
   deepVisionMax: process.env.QWEN_DEEP_VISION_MODEL ?? "qwen3.8-max",
   ocr: process.env.QWEN_OCR_MODEL ?? "qwen3.5-ocr",
+  whisper: "whisper.cpp-base-q5_1",
 } as const;
 
 /**
